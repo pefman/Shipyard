@@ -34,6 +34,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "shipyard:", err)
 			os.Exit(1)
 		}
+	case "login":
+		if err := runLogin(args); err != nil {
+			fmt.Fprintln(os.Stderr, "shipyard:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -49,6 +54,7 @@ func usage() {
 Usage:
   shipyard solve --repo owner/repo --issue <n> [flags]
   shipyard listen --repo owner/repo [flags]
+  shipyard login [flags]
 
 Solve flags:
   --repo owner/repo      GitHub repository (required)
@@ -83,6 +89,17 @@ Listen flags:
   --git-url <url>        Git clone URL for the per-issue checkout
   --include-files <list> Comma-separated files to embed in the prompt
   --dry-run              Apply patches but commit nothing and open no pull requests
+
+Login flags:
+  --github-client-id <id> GitHub OAuth App client ID (env SHIPYARD_GITHUB_CLIENT_ID;
+                          required — never hardcoded, so no token can be baked in)
+  --force                Redo the device flow even if a valid stored token exists
+
+The device flow prints a verification URI and a one-time code; after you
+authorize at the URI, the access token is verified via GET /user and stored
+at $XDG_CONFIG_HOME/shipyard/credentials.json (default
+~/.config/shipyard/credentials.json) with 0600 permissions. Re-running
+the command while a valid token is stored just verifies it and exits.
 `)
 }
 

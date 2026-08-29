@@ -4,6 +4,20 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-26)
+
+- `shipyard login`: GitHub OAuth device flow. Passes the verification URI
+  and one-time code to the terminal, polls for authorization (honoring
+  `slow_down` backoff and the device-code expiry), verifies the token via
+  `GET /user`, and stores it at
+  `$XDG_CONFIG_HOME/shipyard/credentials.json` (default
+  `~/.config/shipyard/credentials.json`) with 0600 permissions, written
+  atomically. Re-running `login` with a valid stored token just verifies
+  it and exits; `--force` (or an invalid stored token) re-does the flow.
+- OAuth App client ID comes from `--github-client-id` /
+  `SHIPYARD_GITHUB_CLIENT_ID` — the client ID is never hardcoded in the
+  repo.
+
 ### Added (SHI-10)
 
 - Provider presets for the AI endpoint: `--provider` / `SHIPYARD_AI_PROVIDER`
