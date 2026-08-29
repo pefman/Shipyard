@@ -33,6 +33,7 @@ type mockServer struct {
 type pollScript struct {
 	code  string // empty means "success: return token"
 	token Token
+	raw   string // literal wire body, takes precedence over code/token
 }
 
 type userScript struct {
@@ -66,6 +67,10 @@ func (m *mockServer) handler() http.HandlerFunc {
 			next := m.poll[m.pollIdx]
 			m.pollIdx++
 			m.mu.Unlock()
+			if next.raw != "" {
+				fmt.Fprint(w, next.raw)
+				return
+			}
 			if next.code == "" {
 				_ = json.NewEncoder(w).Encode(next.token)
 				return
@@ -266,6 +271,143 @@ func TestPollExpiredToken(t *testing.T) {
 		&DeviceCode{Interval: 5, ExpiresIn: 900}, fastSleep(&nilSleeps))
 	if !errors.Is(err, ErrExpiredToken) {
 		t.Fatalf("err = %v, want ErrExpiredToken", err)
+	}
+}
+
+func TestPollWireErrorFieldOutcomes(t *testing.T) {
+	// Regression for the owner's live finding: real GitHub poll
+	// responses carry the outcome in the OAuth-spec "error" field, not
+	// "code". Pending-style outcomes must keep polling whatever field
+	// they arrive in; only denied/expired (and the deadline) are
+	// terminal.
+	const pendingRaw = `{"error":"authorization_pending"}`
+	const slowDownRaw = `{"error":"slow_down"}`
+
+	t.Run("pending pending success", func(t *testing.T) {
+		m := &mockServer{}
+		m.deviceFlow(t)
+		m.poll = []pollScript{
+			{raw: pendingRaw},
+			{raw: pendingRaw},
+			{raw: `{"access_token":"tok-wire","token_type":"bearer","scope":"read:user"}`},
+		}
+		srv := m.start(t)
+
+		var sleeps []time.Duration
+		token, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
+			&DeviceCode{DeviceCode: "dev-code", Interval: 5, ExpiresIn: 900}, fastSleep(&sleeps))
+		if err != nil {
+			t.Fatalf("PollForToken: %v (pending must never be terminal)", err)
+		}
+		if token.AccessToken != "tok-wire" {
+			t.Fatalf("token = %+v", token)
+		}
+		if m.pollCalls() != 3 {
+			t.Errorf("polled %d times, want 3 (pending -> pending -> success)", m.pollCalls())
+		}
+		if len(sleeps) != 2 || sleeps[0] != 5*time.Second || sleeps[1] != 5*time.Second {
+			t.Errorf("slept %v, want [5s 5s]", sleeps)
+		}
+	})
+
+	t.Run("slow_down via error field is not an error", func(t *testing.T) {
+		m := &mockServer{}
+		m.deviceFlow(t)
+		m.poll = []pollScript{
+			{raw: pendingRaw},
+			{raw: slowDownRaw},
+			{raw: `{"access_token":"tok-slow","token_type":"bearer"}`},
+		}
+		srv := m.start(t)
+
+		var sleeps []time.Duration
+		token, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
+			&DeviceCode{DeviceCode: "dev-code", Interval: 5, ExpiresIn: 900}, fastSleep(&sleeps))
+		if err != nil {
+			t.Fatalf("PollForToken: %v (slow_down must not be terminal)", err)
+		}
+		if token.AccessToken != "tok-slow" {
+			t.Fatalf("token = %+v", token)
+		}
+		// 5s on the first pending, then +5s after slow_down.
+		if len(sleeps) != 2 || sleeps[0] != 5*time.Second || sleeps[1] != 10*time.Second {
+			t.Errorf("slept %v, want [5s 10s]", sleeps)
+		}
+	})
+
+	t.Run("denied via error field", func(t *testing.T) {
+		m := &mockServer{}
+		m.deviceFlow(t)
+		m.poll = []pollScript{{raw: `{"error":"access_denied"}`}}
+		srv := m.start(t)
+
+		_, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
+			&DeviceCode{Interval: 5, ExpiresIn: 900}, fastSleep(&nilSleeps))
+		if !errors.Is(err, ErrAccessDenied) {
+			t.Fatalf("err = %v, want ErrAccessDenied", err)
+		}
+	})
+
+	t.Run("expired via error field", func(t *testing.T) {
+		m := &mockServer{}
+		m.deviceFlow(t)
+		m.poll = []pollScript{{raw: `{"error":"expired_token"}`}}
+		srv := m.start(t)
+
+		_, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
+			&DeviceCode{Interval: 5, ExpiresIn: 900}, fastSleep(&nilSleeps))
+		if !errors.Is(err, ErrExpiredToken) {
+			t.Fatalf("err = %v, want ErrExpiredToken", err)
+		}
+	})
+}
+
+func TestPollPendingUntilDeadline(t *testing.T) {
+	// The loop must keep polling through every authorization_pending
+	// response until the expires_in deadline — never exiting on the
+	// first pending (owner's live regression).
+	var polls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			polls++
+			fmt.Fprint(w, `{"error":"authorization_pending"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
+		&DeviceCode{DeviceCode: "dev-code", Interval: 5, ExpiresIn: 1}, fastSleep(&nilSleeps))
+	if !errors.Is(err, ErrExpiredToken) {
+		t.Fatalf("err = %v, want ErrExpiredToken at the deadline", err)
+	}
+	if polls < 2 {
+		t.Fatalf("polled %d times; the loop exited on or before the first pending", polls)
+	}
+}
+
+func TestPollContextCancelExitsGracefully(t *testing.T) {
+	// A canceled context (Ctrl-C) must end the poll loop with
+	// context.Canceled — not a token-poll error.
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/login/oauth/access_token" {
+			cancel() // the user hits Ctrl-C while we are waiting
+			fmt.Fprint(w, `{"error":"authorization_pending"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := PollForToken(ctx, srv.Client(), srv.URL+"/login", "cid-test",
+		&DeviceCode{DeviceCode: "dev-code", Interval: 5, ExpiresIn: 900}, fastSleep(&nilSleeps))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
 

@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/pefman/Shipyard/internal/auth"
 )
@@ -40,10 +43,19 @@ func runLogin(args []string) error {
 
 	id := resolveClientID(*clientID)
 
-	if _, err := auth.Run(context.Background(), auth.Deps{
+	// Graceful shutdown: Ctrl-C / SIGTERM cancels the context so the poll
+	// loop exits with a clear "interrupted" result instead of a
+	// token-poll error mid-wait.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if _, err := auth.Run(ctx, auth.Deps{
 		ClientID: id,
 		Force:    *force,
 	}); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return errors.New("login interrupted")
+		}
 		return err
 	}
 	// Run already printed the outcome ("Logged in as @x" or the
