@@ -56,6 +56,25 @@ func TestExtractPatchUnfenced(t *testing.T) {
 	}
 }
 
+func TestExtractPatchUnfencedTrailingProse(t *testing.T) {
+	// Models often put the explanation after the diff; on the unfenced
+	// path that prose must not be handed to git apply.
+	resp := "diff --git a/x.go b/x.go\n--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-old\n+new\n\nThat was the change: the old line was wrong.\nYou can ship this now.\n"
+	patch, explanation, err := ExtractPatch(resp)
+	if err != nil {
+		t.Fatalf("ExtractPatch: %v", err)
+	}
+	if strings.Contains(patch, "That was the change") {
+		t.Errorf("trailing prose leaked into the patch:\n%s", patch)
+	}
+	if !strings.Contains(patch, "+new\n") || strings.HasSuffix(patch, "+new\n\n") {
+		t.Errorf("patch should end at the last hunk line:\n%q", patch)
+	}
+	if !strings.Contains(explanation, "That was the change") {
+		t.Errorf("trailing prose should end up in the explanation:\n%s", explanation)
+	}
+}
+
 func TestExtractPatchBareHunks(t *testing.T) {
 	resp := "Fix below:\n```git\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n```\n"
 	patch, _, err := ExtractPatch(resp)

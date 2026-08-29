@@ -100,8 +100,11 @@ func newFakeGitHub(t *testing.T, cloneURL string) *fakeGitHub {
 func newFakeAI(t *testing.T, response string) *aiclient.Client {
 	t.Helper()
 	mux := http.NewServeMux()
-	var lastPrompt string
-	var aiCalled bool
+	var (
+		mu         sync.Mutex
+		lastPrompt string
+		aiCalled   bool
+	)
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req struct {
@@ -112,10 +115,12 @@ func newFakeAI(t *testing.T, response string) *aiclient.Client {
 			} `json:"messages"`
 		}
 		_ = json.Unmarshal(body, &req)
+		mu.Lock()
 		if len(req.Messages) > 0 {
 			lastPrompt = req.Messages[0].Content
 			aiCalled = true
 		}
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, jsonString(response))
 	})
@@ -123,12 +128,15 @@ func newFakeAI(t *testing.T, response string) *aiclient.Client {
 	t.Cleanup(srv.Close)
 	c := aiclient.NewClient(srv.URL+"/v1", "ai-key")
 	t.Cleanup(func() {
-		if !aiCalled {
+		mu.Lock()
+		called, prompt := aiCalled, lastPrompt
+		mu.Unlock()
+		if !called {
 			return // the flow failed before reaching the AI endpoint
 		}
 		for _, want := range []string{"Issue #9: greet() crashes on empty input", "bug", "greet('') should return", "unified diff"} {
-			if !strings.Contains(lastPrompt, want) {
-				t.Errorf("prompt sent to AI missing %q:\n%s", want, lastPrompt)
+			if !strings.Contains(prompt, want) {
+				t.Errorf("prompt sent to AI missing %q:\n%s", want, prompt)
 			}
 		}
 	})

@@ -25,7 +25,10 @@ var fencedBlockRe = regexp.MustCompile("(?m)(?s)^```[^\n]*\n(.*?)^```[ \t]*$")
 //  1. a fenced code block whose content contains "diff --git" lines,
 //  2. another fenced block that at least looks like a diff
 //     ("--- " / "+++ " line pairs),
-//  3. an unfenced region starting at the first "diff --git" line.
+//  3. an unfenced region starting at the first "diff --git" line; on
+//     this path the patch is cut off at the first line that is not part
+//     of the diff, so an explanation the model wrote after the diff is
+//     not handed to git apply.
 func ExtractPatch(response string) (patch, explanation string, err error) {
 	blocks := fencedBlockRe.FindAllStringSubmatch(response, -1)
 
@@ -42,7 +45,7 @@ func ExtractPatch(response string) (patch, explanation string, err error) {
 		}
 	}
 	if i := rawDiffStart(response); i >= 0 {
-		patch = cleanPatch(response[i:])
+		patch = cleanPatch(trimTrailingProse(response[i:]))
 		return patch, explain(response, patch), nil
 	}
 	return "", "", fmt.Errorf("%w (save the raw response, check the endpoint/model configuration, or re-run)", ErrNoUsableChanges)
@@ -65,7 +68,9 @@ func looksLikeDiff(s string) bool {
 }
 
 // rawDiffStart returns the byte offset of the first line starting with
-// "diff --git " or "--- " (unfenced responses), or -1.
+// "diff --git " (unfenced responses), or -1. Bare "--- " lines are
+// deliberately not treated as a start: in prose they are too common
+// (markdown rules, sign-offs) for that to be a safe signal.
 func rawDiffStart(s string) int {
 	lines := strings.Split(s, "\n")
 	off := 0
@@ -78,6 +83,46 @@ func rawDiffStart(s string) int {
 	return -1
 }
 
+// trimTrailingProse cuts an unfenced diff stream at the first line that
+// is not part of the diff, so prose the model wrote after the diff is
+// not passed to git apply. Blank lines are kept (they are valid inside
+// hunks); trailing blanks are dropped by cleanPatch. Prose lines that
+// happen to start with a space, +, or - (e.g. an indented list) are
+// misread as hunk lines and extend the patch — acceptable for a
+// best-effort fallback path; the fenced block is the supported shape.
+func trimTrailingProse(s string) string {
+	lines := strings.Split(s, "\n")
+	inHunk := false
+	end := len(lines)
+	for i := range lines {
+		line := lines[i]
+		if inHunk {
+			if line == "" || isDiffLine(line) {
+				continue
+			}
+			end = i
+			break
+		}
+		if strings.HasPrefix(line, "@@") {
+			inHunk = true
+		}
+	}
+	return strings.Join(lines[:end], "\n")
+}
+
+// isDiffLine reports whether line is a line inside a unified diff hunk:
+// a context line (leading space), an addition, or a deletion.
+func isDiffLine(line string) bool {
+	if line == "" {
+		return false
+	}
+	switch line[0] {
+	case ' ', '+', '-':
+		return true
+	}
+	return false
+}
+
 // cleanPatch trims trailing blank lines and stray fence markers so the
 // result is a clean file for git apply.
 func cleanPatch(s string) string {
@@ -88,17 +133,21 @@ func cleanPatch(s string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// fenceMarkerRe matches pure fence lines: the closing "```" or an
+// opening fence with a language tag ("```diff").
+var fenceMarkerRe = regexp.MustCompile("^```\\w*$")
+
 // explain returns the response with the patch region removed: the prose
-// the model wrote alongside the diff.
+// the model wrote alongside the diff. Only pure fence marker lines are
+// dropped, so a legitimate ``` code sample in the explanation survives.
 func explain(response, patch string) string {
 	rest := response
 	if i := strings.Index(rest, patch); i >= 0 {
 		rest = rest[:i] + rest[i+len(patch):]
 	}
-	// Drop fence markers left behind.
 	var b strings.Builder
 	for _, line := range strings.Split(rest, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+		if fenceMarkerRe.MatchString(strings.TrimSpace(line)) {
 			continue
 		}
 		b.WriteString(line + "\n")

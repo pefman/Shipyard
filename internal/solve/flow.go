@@ -120,9 +120,14 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 		ResponsePath: responsePath,
 	}
 	if o.DryRun {
-		stat, _ := git.Run(ctx, workdir, "diff", "--stat")
+		stat, statErr := git.Run(ctx, workdir, "diff", "--stat")
+		if statErr != nil {
+			log("warning: could not show the diff stat: %v", statErr)
+		}
 		log("dry run: nothing committed, pushed, or opened; the workdir is left dirty for you to inspect.")
-		log("diff stat:\n%s", strings.TrimRight(stat, "\n"))
+		if statErr == nil {
+			log("diff stat:\n%s", strings.TrimRight(stat, "\n"))
+		}
 		return res, nil
 	}
 

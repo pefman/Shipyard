@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/pefman/Shipyard/internal/aiclient"
@@ -40,13 +41,25 @@ func (execGit) Run(ctx context.Context, dir string, args ...string) (string, err
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errb.String())
+		msg := RedactCredentials(strings.TrimSpace(errb.String()))
 		if msg != "" {
-			return out.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
+			return out.String(), fmt.Errorf("git %s: %w: %s", RedactCredentials(strings.Join(args, " ")), err, msg)
 		}
-		return out.String(), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return out.String(), fmt.Errorf("git %s: %w", RedactCredentials(strings.Join(args, " ")), err)
 	}
 	return out.String(), nil
+}
+
+// credURLRe matches the userinfo part of a URL (user:pass@ or the
+// x-access-token:<token>@ prefix CloneURLWithToken embeds) so embedded
+// credentials never end up in an error message or log line.
+var credURLRe = regexp.MustCompile(`://[^@\s]+@`)
+
+// RedactCredentials replaces any user:pass / x-access-token:<token>
+// embedded in a URL with ***. Apply it to anything that may carry a
+// git command line or git's stderr before putting it in an error or log.
+func RedactCredentials(s string) string {
+	return credURLRe.ReplaceAllString(s, "://***@")
 }
 
 // Options configures one solve run.
