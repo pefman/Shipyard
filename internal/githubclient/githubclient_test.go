@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -44,7 +45,7 @@ func TestGetIssue(t *testing.T) {
 		"html_url": "https://github.com/owner/repo/issues/7",
 		"labels": [{"name": "bug"}, {"name": "auth"}]
 	}`
-	repo := `{"full_name": "owner/repo", "private": false, "html_url": "https://github.com/owner/repo"}`
+	repo := `{"full_name": "owner/repo", "private": false, "html_url": "https://github.com/owner/repo", "clone_url": "https://github.com/owner/repo.git", "default_branch": "main"}`
 	c := startGitHubServer(t, []byte(payload), []byte(repo))
 
 	issue, err := c.GetIssue(context.Background(), "owner", "repo", 7)
@@ -93,5 +94,82 @@ func TestGetIssueNotFound(t *testing.T) {
 
 	if _, err := c.GetIssue(context.Background(), "owner", "repo", 404); err == nil {
 		t.Fatal("GetIssue: expected error for 404, got nil")
+	}
+}
+
+func TestCreatePR(t *testing.T) {
+	var gotAuth, gotHead, gotBase, gotTitle, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/owner/repo/pulls" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		var req struct {
+			Title, Head, Base, Body string
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding pull request payload: %v", err)
+		}
+		gotTitle, gotHead, gotBase, gotBody = req.Title, req.Head, req.Base, req.Body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number": 42, "title": "Fix #7: Broken login", "state": "open", "html_url": "https://github.com/owner/repo/pull/42"}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		if gotAuth != "Bearer test-token" {
+			t.Errorf("expected Bearer test-token, got %q", gotAuth)
+		}
+	})
+	c := NewClient(srv.URL, "test-token")
+
+	pr, err := c.CreatePR(context.Background(), "owner", "repo", PRRequest{
+		Title: "Fix #7: Broken login", Head: "shipyard/issue-7", Base: "main",
+		Body: "Solves [Broken login](https://github.com/owner/repo/issues/7) (#7). Fix #7.",
+	})
+	if err != nil {
+		t.Fatalf("CreatePR: %v", err)
+	}
+	if pr.Number != 42 || !strings.HasSuffix(pr.HTMLURL, "/pull/42") {
+		t.Errorf("PR = %+v", pr)
+	}
+	if gotTitle != "Fix #7: Broken login" || gotHead != "shipyard/issue-7" || gotBase != "main" {
+		t.Errorf("server saw title=%q head=%q base=%q", gotTitle, gotHead, gotBase)
+	}
+	if !strings.Contains(gotBody, "issues/7") {
+		t.Errorf("PR body should link the source issue, got %q", gotBody)
+	}
+}
+
+func TestCreatePRMissingPermissions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message": "Resource not accessible by integration"}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "test-token")
+
+	_, err := c.CreatePR(context.Background(), "owner", "repo", PRRequest{Title: "x", Head: "h", Base: "b"})
+	if err == nil {
+		t.Fatal("CreatePR: expected error for 403, got nil")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected 403 in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "missing the permissions") {
+		t.Errorf("expected permission hint in error, got %v", err)
+	}
+}
+
+func TestCreatePRBadToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message": "Bad credentials"}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "test-token")
+
+	_, err := c.CreatePR(context.Background(), "owner", "repo", PRRequest{Title: "x", Head: "h", Base: "b"})
+	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "token is valid and not expired") {
+		t.Errorf("expected 401 with token hint, got %v", err)
 	}
 }
