@@ -13,7 +13,7 @@ import (
 // configuration. Client IDs are public identifiers, not secrets. Users
 // with their own OAuth App can override via --github-client-id or
 // SHIPYARD_GITHUB_CLIENT_ID.
-const defaultGitHubClientID = "4764331"
+const defaultGitHubClientID = "Iv23lipRhtA8srclwbp3"
 
 // resolveClientID applies the client-ID precedence: the --github-client-id
 // flag value, then the SHIPYARD_GITHUB_CLIENT_ID environment variable, then

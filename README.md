@@ -89,7 +89,7 @@ re-solve issues. Use `--label` to only solve labeled issues and
 ### `shipyard login`
 
 Authenticates with GitHub via the OAuth device flow. Works out of the box —
-shipyard ships a pre-registered GitHub OAuth App (client ID `4764331`), so
+shipyard ships a pre-registered GitHub OAuth App (client ID `Iv23lipRhtA8srclwbp3`), so
 no flags or environment variables are needed:
 
 ```sh

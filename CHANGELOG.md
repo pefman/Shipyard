@@ -6,7 +6,7 @@ Notable changes to Shipyard, newest first.
 
 ### Added (SHI-29)
 
-- Built-in default GitHub OAuth App client ID (`4764331`) for `shipyard
+- Built-in default GitHub OAuth App client ID (`Iv23lipRhtA8srclwbp3`) for `shipyard
   login`: login now works with zero configuration, exactly like
   `gh auth login`. Precedence: `--github-client-id` flag >
   `SHIPYARD_GITHUB_CLIENT_ID` env > built-in default, so anyone with their

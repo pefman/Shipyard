@@ -48,7 +48,7 @@ func TestResolveClientIDPrecedence(t *testing.T) {
 // default; a silent change here would break zero-config login for every
 // user until someone re-registered the app.
 func TestDefaultClientIDIsOwnerRegisteredApp(t *testing.T) {
-	if defaultGitHubClientID != "4764331" {
-		t.Fatalf("built-in default client ID = %q, want %q", defaultGitHubClientID, "4764331")
+	if defaultGitHubClientID != "Iv23lipRhtA8srclwbp3" {
+		t.Fatalf("built-in default client ID = %q, want %q", defaultGitHubClientID, "Iv23lipRhtA8srclwbp3")
 	}
 }
