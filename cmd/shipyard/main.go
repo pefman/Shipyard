@@ -1,6 +1,7 @@
-// Command shipyard is an AI issue solver: it reads a GitHub issue, sends it
-// to a configurable AI endpoint with repository context, and prints the
-// AI's response (the proposed fix).
+// Command shipyard is an AI issue solver: it reads a GitHub issue, sends
+// it to a configurable AI endpoint with repository context, applies the
+// generated patch to a local checkout, and opens a pull request that
+// links the source issue.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/solve"
 )
 
 func main() {
@@ -49,6 +51,12 @@ Solve flags:
   --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT)
   --ai-key <k>           AI API key (env SHIPYARD_AI_KEY)
   --ai-model <m>         Model name sent to the endpoint
+  --workdir <dir>        Local checkout to build on (default: clone to a temp dir)
+  --base <branch>        Base branch (default: the repo's default branch)
+  --branch <name>        Branch for the fix (default: shipyard/issue-<n>)
+  --include-files <list> Comma-separated files to embed in the prompt
+  --git-url <url>        Git clone URL (with --workdir unset; default from the API)
+  --dry-run              Stop after applying the patch: no commit, push, or PR
 `)
 }
 
@@ -60,6 +68,12 @@ func runSolve(args []string) error {
 	aiEndpoint := fs.String("ai-endpoint", "", "AI endpoint base URL")
 	aiKey := fs.String("ai-key", "", "AI API key")
 	aiModel := fs.String("ai-model", "", "model name for the AI endpoint")
+	workdir := fs.String("workdir", "", "local checkout to build on (default: clone)")
+	base := fs.String("base", "", "base branch (default: repo default branch)")
+	branch := fs.String("branch", "", "branch for the fix (default: shipyard/issue-<n>)")
+	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
+	gitURL := fs.String("git-url", "", "git clone URL (with --workdir unset)")
+	dryRun := fs.Bool("dry-run", false, "stop after applying the patch: no commit, push, or PR")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -84,16 +98,11 @@ func runSolve(args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
-
-	github := githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken)
-	repoInfo, err := github.GetRepo(ctx, owner, name)
-	if err != nil {
-		return fmt.Errorf("fetching repo: %w", err)
-	}
-	issueInfo, err := github.GetIssue(ctx, owner, name, *issue)
-	if err != nil {
-		return fmt.Errorf("fetching issue: %w", err)
+	var files []string
+	for _, f := range strings.Split(*includeFiles, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			files = append(files, f)
+		}
 	}
 
 	ai := aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey)
@@ -101,27 +110,36 @@ func runSolve(args []string) error {
 		ai.Model = *aiModel
 	}
 
-	fmt.Fprintf(os.Stderr, "solving %s (issue #%d: %s)\n", repoInfo.FullName, issueInfo.Number, issueInfo.Title)
-	response, err := ai.Complete(ctx, buildPrompt(repoInfo, issueInfo))
+	res, err := solve.Solve(context.Background(), solve.Deps{
+		GitHub: githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken),
+		AI:     ai,
+	}, solve.Options{
+		Owner:        owner,
+		Repo:         name,
+		IssueNumber:  *issue,
+		Workdir:      *workdir,
+		GitURL:       *gitURL,
+		Base:         *base,
+		Branch:       *branch,
+		IncludeFiles: files,
+		DryRun:       *dryRun,
+	})
 	if err != nil {
-		return fmt.Errorf("calling AI endpoint: %w", err)
+		return err
 	}
-	fmt.Println(response)
-	return nil
-}
 
-// buildPrompt assembles the prompt sent to the AI endpoint: the issue
-// details plus the repository context the solving flow has so far.
-func buildPrompt(repo *githubclient.Repo, issue *githubclient.Issue) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "You are an autonomous engineer solving a GitHub issue.\n\n")
-	fmt.Fprintf(&b, "Repository: %s\n", repo.FullName)
-	fmt.Fprintf(&b, "Issue #%d: %s\n", issue.Number, issue.Title)
-	if len(issue.Labels) > 0 {
-		fmt.Fprintf(&b, "Labels: %s\n", strings.Join(issue.Labels, ", "))
+	fmt.Fprintf(os.Stderr, "done: branch %s on %s\n", res.Branch, res.Workdir)
+	fmt.Fprintln(os.Stderr, "patch: "+res.PatchPath)
+	fmt.Fprintln(os.Stderr, "AI response: "+res.ResponsePath)
+	if res.PR != nil {
+		fmt.Printf("\nPull request opened: %s (#%d)\n", res.PR.HTMLURL, res.PR.Number)
 	}
-	fmt.Fprintf(&b, "\nIssue body:\n%s\n", issue.Body)
-	fmt.Fprintf(&b, "\nRespond with the concrete changes that resolve this issue,")
-	fmt.Fprintf(&b, " as a unified diff where possible, plus a short explanation.")
-	return b.String()
+	// Also print to stdout so the result is machine-usable: the PR URL
+	// (real runs) or the patch path (dry runs).
+	if res.PR != nil {
+		fmt.Println(res.PR.HTMLURL)
+	} else {
+		fmt.Println(res.PatchPath)
+	}
+	return nil
 }
