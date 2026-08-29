@@ -41,6 +41,7 @@ func setEnv(t *testing.T, values map[string]string) {
 }
 
 func TestLoad(t *testing.T) {
+	const ghAPI = "https://api.github.com"
 	tests := []struct {
 		name    string
 		raw     Raw
@@ -49,41 +50,121 @@ func TestLoad(t *testing.T) {
 		wantErr string // substring; "" means no error
 	}{
 		{
-			name: "nothing anywhere",
+			// Custom is the default provider: the key is optional, so a
+			// keyless local endpoint is valid.
+			name: "nothing anywhere (default custom)",
 			wantErr: "missing required configuration: " +
 				"--github-token or SHIPYARD_GITHUB_TOKEN, " +
-				"--ai-endpoint or SHIPYARD_AI_ENDPOINT, " +
-				"--ai-key or SHIPYARD_AI_KEY",
+				"--ai-endpoint or SHIPYARD_AI_ENDPOINT",
 		},
 		{
-			name: "only env",
-			env:  map[string]string{EnvGitHubToken: "env-token", EnvAIEndpoint: "https://ai.example/v1", EnvAIKey: "env-key"},
-			want: Config{GitHubToken: "env-token", AIEndpoint: "https://ai.example/v1", AIKey: "env-key", GitHubAPIRoot: "https://api.github.com"},
+			name: "custom: endpoint and key from env",
+			env:  map[string]string{EnvGitHubToken: "env-token", EnvAIEndpoint: "http://localhost:8080", EnvAIKey: "env-key"},
+			want: Config{GitHubToken: "env-token", AIProvider: "custom", AIEndpoint: "http://localhost:8080", AIKey: "env-key", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "custom: key optional",
+			raw:  Raw{GitHubToken: "flag-token", AIEndpoint: "http://localhost:8080"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "custom", AIEndpoint: "http://localhost:8080", GitHubAPIRoot: ghAPI},
 		},
 		{
 			name: "flags win over env",
 			raw:  Raw{GitHubToken: "flag-token", AIEndpoint: "https://flag.example/v1", AIKey: "flag-key"},
 			env:  map[string]string{EnvGitHubToken: "env-token", EnvAIEndpoint: "https://ai.example/v1", EnvAIKey: "env-key"},
-			want: Config{GitHubToken: "flag-token", AIEndpoint: "https://flag.example/v1", AIKey: "flag-key", GitHubAPIRoot: "https://api.github.com"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "custom", AIEndpoint: "https://flag.example/v1", AIKey: "flag-key", GitHubAPIRoot: ghAPI},
 		},
 		{
 			name: "per-field precedence",
 			raw:  Raw{AIKey: "flag-key"},
 			env:  map[string]string{EnvGitHubToken: "env-token", EnvAIEndpoint: "https://ai.example/v1"},
-			want: Config{GitHubToken: "env-token", AIEndpoint: "https://ai.example/v1", AIKey: "flag-key", GitHubAPIRoot: "https://api.github.com"},
+			want: Config{GitHubToken: "env-token", AIProvider: "custom", AIEndpoint: "https://ai.example/v1", AIKey: "flag-key", GitHubAPIRoot: ghAPI},
 		},
 		{
 			name: "partially missing lists exactly what is missing",
 			raw:  Raw{GitHubToken: "flag-token"},
 			wantErr: "missing required configuration: " +
-				"--ai-endpoint or SHIPYARD_AI_ENDPOINT, " +
-				"--ai-key or SHIPYARD_AI_KEY",
+				"--ai-endpoint or SHIPYARD_AI_ENDPOINT",
 		},
 		{
 			name: "empty flag falls back to env",
 			raw:  Raw{GitHubToken: "", AIEndpoint: "https://flag.example/v1", AIKey: "flag-key"},
 			env:  map[string]string{EnvGitHubToken: "env-token"},
-			want: Config{GitHubToken: "env-token", AIEndpoint: "https://flag.example/v1", AIKey: "flag-key", GitHubAPIRoot: "https://api.github.com"},
+			want: Config{GitHubToken: "env-token", AIProvider: "custom", AIEndpoint: "https://flag.example/v1", AIKey: "flag-key", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "openai preset: base URL and model from preset, key via provider env",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "openai"},
+			env:  map[string]string{EnvOpenAIKey: "openai-key"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "openai", AIEndpoint: "https://api.openai.com/v1",
+				AIKey: "openai-key", AIModel: "gpt-5.6-sol", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name:    "openai without a key errors",
+			raw:     Raw{GitHubToken: "flag-token", Provider: "openai"},
+			wantErr: "an AI key for openai: --ai-key, SHIPYARD_OPENAI_KEY, or SHIPYARD_AI_KEY",
+		},
+		{
+			name: "openai accepts the generic key",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "openai"},
+			env:  map[string]string{EnvAIKey: "generic-key"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "openai", AIEndpoint: "https://api.openai.com/v1",
+				AIKey: "generic-key", AIModel: "gpt-5.6-sol", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "provider-specific key wins over generic",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "openai"},
+			env:  map[string]string{EnvOpenAIKey: "openai-key", EnvAIKey: "generic-key"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "openai", AIEndpoint: "https://api.openai.com/v1",
+				AIKey: "openai-key", AIModel: "gpt-5.6-sol", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "xai preset: base URL, model, key via provider env",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "xai"},
+			env:  map[string]string{EnvXAIKey: "xai-key"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "xai", AIEndpoint: "https://api.x.ai/v1",
+				AIKey: "xai-key", AIModel: "grok-4.6", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name:    "xai without a key errors",
+			raw:     Raw{GitHubToken: "flag-token", Provider: "xai"},
+			wantErr: "an AI key for xai: --ai-key, SHIPYARD_XAI_KEY, or SHIPYARD_AI_KEY",
+		},
+		{
+			name: "provider flag wins over provider env",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "xai", AIKey: "flag-key"},
+			env:  map[string]string{EnvAIProvider: "openai"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "xai", AIEndpoint: "https://api.x.ai/v1",
+				AIKey: "flag-key", AIModel: "grok-4.6", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "provider is case-insensitive",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "OpenAI", AIKey: "flag-key"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "openai", AIEndpoint: "https://api.openai.com/v1",
+				AIKey: "flag-key", AIModel: "gpt-5.6-sol", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "unknown provider errors",
+			raw:  Raw{Provider: "anthropic"},
+			wantErr: "unknown AI provider \"anthropic\": expected openai, xai, or custom",
+		},
+		{
+			name: "explicit endpoint overrides the preset base URL",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "openai", AIEndpoint: "https://proxy.example/v1", AIKey: "flag-key"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "openai", AIEndpoint: "https://proxy.example/v1",
+				AIKey: "flag-key", AIModel: "gpt-5.6-sol", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "model flag wins over the preset default",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "xai", AIKey: "flag-key", AIModel: "grok-4.5"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "xai", AIEndpoint: "https://api.x.ai/v1",
+				AIKey: "flag-key", AIModel: "grok-4.5", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name: "model env beats the preset default",
+			raw:  Raw{GitHubToken: "flag-token", Provider: "openai", AIKey: "flag-key"},
+			env:  map[string]string{EnvAIModel: "gpt-5.6-luna"},
+			want: Config{GitHubToken: "flag-token", AIProvider: "openai", AIEndpoint: "https://api.openai.com/v1",
+				AIKey: "flag-key", AIModel: "gpt-5.6-luna", GitHubAPIRoot: ghAPI},
 		},
 	}
 	for _, tc := range tests {
