@@ -29,6 +29,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "shipyard:", err)
 			os.Exit(1)
 		}
+	case "listen":
+		if err := runListen(args); err != nil {
+			fmt.Fprintln(os.Stderr, "shipyard:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -43,6 +48,7 @@ func usage() {
 
 Usage:
   shipyard solve --repo owner/repo --issue <n> [flags]
+  shipyard listen --repo owner/repo [flags]
 
 Solve flags:
   --repo owner/repo      GitHub repository (required)
@@ -60,6 +66,23 @@ Solve flags:
   --include-files <list> Comma-separated files to embed in the prompt
   --git-url <url>        Git clone URL (with --workdir unset; default from the API)
   --dry-run              Stop after applying the patch: no commit, push, or PR
+
+Listen flags:
+  --repo owner/repo      GitHub repository to watch (required)
+  --interval <dur>       Delay between poll passes (default 1m)
+  --label <name>         Only solve issues carrying this label (repeatable)
+  --state-file <path>    File tracking processed issues (default: shipyard-listen-state.json)
+  --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN)
+  --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
+                         default custom: --ai-endpoint required, key optional)
+  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
+  --ai-key <k>           AI API key (env SHIPYARD_AI_KEY; also SHIPYARD_OPENAI_KEY / SHIPYARD_XAI_KEY)
+  --ai-model <m>         Model name sent to the endpoint (env SHIPYARD_AI_MODEL;
+                         defaults: openai gpt-5.6-sol, xai grok-4.6)
+  --base <branch>        Base branch (default: the repo's default branch)
+  --git-url <url>        Git clone URL for the per-issue checkout
+  --include-files <list> Comma-separated files to embed in the prompt
+  --dry-run              Apply patches but commit nothing and open no pull requests
 `)
 }
 
