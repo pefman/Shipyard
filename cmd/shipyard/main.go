@@ -48,9 +48,12 @@ Solve flags:
   --repo owner/repo      GitHub repository (required)
   --issue <n>            Issue number to solve (required)
   --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN)
-  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT)
-  --ai-key <k>           AI API key (env SHIPYARD_AI_KEY)
-  --ai-model <m>         Model name sent to the endpoint
+  --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
+                         default custom: --ai-endpoint required, key optional)
+  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
+  --ai-key <k>           AI API key (env SHIPYARD_AI_KEY; also SHIPYARD_OPENAI_KEY / SHIPYARD_XAI_KEY)
+  --ai-model <m>         Model name sent to the endpoint (env SHIPYARD_AI_MODEL;
+                         defaults: openai gpt-5.6-sol, xai grok-4.6)
   --workdir <dir>        Local checkout to build on (default: clone to a temp dir)
   --base <branch>        Base branch (default: the repo's default branch)
   --branch <name>        Branch for the fix (default: shipyard/issue-<n>)
@@ -65,6 +68,7 @@ func runSolve(args []string) error {
 	repo := fs.String("repo", "", "GitHub repository (owner/repo)")
 	issue := fs.Int("issue", 0, "issue number to solve")
 	githubToken := fs.String("github-token", "", "GitHub token")
+	aiProvider := fs.String("provider", "", "AI provider: openai, xai, or custom")
 	aiEndpoint := fs.String("ai-endpoint", "", "AI endpoint base URL")
 	aiKey := fs.String("ai-key", "", "AI API key")
 	aiModel := fs.String("ai-model", "", "model name for the AI endpoint")
@@ -91,8 +95,10 @@ func runSolve(args []string) error {
 
 	cfg, err := config.Load(config.Raw{
 		GitHubToken: *githubToken,
+		Provider:    *aiProvider,
 		AIEndpoint:  *aiEndpoint,
 		AIKey:       *aiKey,
+		AIModel:     *aiModel,
 	})
 	if err != nil {
 		return err
@@ -105,10 +111,7 @@ func runSolve(args []string) error {
 		}
 	}
 
-	ai := aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey)
-	if *aiModel != "" {
-		ai.Model = *aiModel
-	}
+	ai := aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey, cfg.AIModel)
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub: githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken),

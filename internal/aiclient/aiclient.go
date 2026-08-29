@@ -25,12 +25,14 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// NewClient returns a Client for the given endpoint base URL and API key.
-func NewClient(baseURL, apiKey string) *Client {
+// NewClient returns a Client for the given endpoint base URL, API key, and
+// model name. An empty API key sends no Authorization header (keyless
+// custom endpoints); an empty model is sent as-is.
+func NewClient(baseURL, apiKey, model string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		APIKey:     apiKey,
-		Model:      "gpt-4o-mini",
+		Model:      model,
 		HTTPClient: http.DefaultClient,
 	}
 }

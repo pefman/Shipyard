@@ -144,9 +144,10 @@ Flags take precedence over environment variables.
 | `--repo`          | —                         | yes      | GitHub repository, `owner/repo`                      |
 | `--issue`         | —                         | yes      | Issue number to solve                                |
 | `--github-token`  | `SHIPYARD_GITHUB_TOKEN`   | yes      | GitHub token (classic PAT or fine-grained)           |
-| `--ai-endpoint`   | `SHIPYARD_AI_ENDPOINT`    | yes      | AI endpoint base URL, e.g. `https://api.openai.com/v1` |
-| `--ai-key`        | `SHIPYARD_AI_KEY`         | yes      | API key for the AI endpoint                          |
-| `--ai-model`      | —                         | no       | Model name sent to the endpoint (default `gpt-4o-mini`) |
+| `--provider`      | `SHIPYARD_AI_PROVIDER`    | no       | AI provider preset: `openai`, `xai`, or `custom` (default `custom`) |
+| `--ai-endpoint`   | `SHIPYARD_AI_ENDPOINT`    | yes for `custom` | AI endpoint base URL; `openai`/`xai` use their preset base URLs |
+| `--ai-key`        | `SHIPYARD_AI_KEY` (also `SHIPYARD_OPENAI_KEY` / `SHIPYARD_XAI_KEY`) | yes for `openai`/`xai` | API key for the AI endpoint |
+| `--ai-model`      | `SHIPYARD_AI_MODEL`       | no       | Model name (defaults: `gpt-5.6-sol` for `openai`, `grok-4.6` for `xai`) |
 | `--workdir`       | —                         | no       | Local checkout to build on (default: clone to temp)  |
 | `--base`          | —                         | no       | Base branch (default: the repo's default branch)     |
 | `--branch`        | —                         | no       | Branch for the fix (default: `shipyard/issue-<n>`)   |
@@ -156,6 +157,28 @@ Flags take precedence over environment variables.
 
 `SHIPYARD_GITHUB_API` (env only) overrides the GitHub API base URL
 (default `https://api.github.com`); useful against GHE or in tests.
+
+### AI providers
+
+`--provider` selects a preset that pins the endpoint base URL and default
+model, so provider switches are one flag apart:
+
+- `openai` — ChatGPT, base `https://api.openai.com/v1`, default model
+  `gpt-5.6-sol`, key required (`SHIPYARD_OPENAI_KEY` or `SHIPYARD_AI_KEY`).
+- `xai` — Grok, base `https://api.x.ai/v1`, default model `grok-4.6`, key
+  required (`SHIPYARD_XAI_KEY` or `SHIPYARD_AI_KEY`).
+- `custom` (default) — any OpenAI-compatible endpoint via
+  `--ai-endpoint` / `SHIPYARD_AI_ENDPOINT`; the key is optional, so a local
+  endpoint such as `http://localhost:8080` needs none.
+
+`--ai-model` / `SHIPYARD_AI_MODEL` overrides the preset's default model in
+all cases. One-line examples:
+
+```sh
+shipyard solve --repo owner/repo --issue 42 --provider openai
+shipyard solve --repo owner/repo --issue 42 --provider xai
+shipyard solve --repo owner/repo --issue 42 --ai-endpoint http://localhost:8080
+```
 
 ### GitHub token
 

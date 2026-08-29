@@ -37,7 +37,7 @@ func startAIServer(t *testing.T, respStatus int, respBody []byte) (*Client, *htt
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	c := NewClient(srv.URL+"/v1", "ai-key")
+	c := NewClient(srv.URL+"/v1", "ai-key", "test-model")
 	t.Cleanup(func() {
 		if gotAuth != "" && gotAuth != "Bearer ai-key" {
 			t.Errorf("expected Bearer ai-key auth header, got %q", gotAuth)

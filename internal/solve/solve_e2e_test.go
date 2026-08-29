@@ -126,7 +126,7 @@ func newFakeAI(t *testing.T, response string) *aiclient.Client {
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	c := aiclient.NewClient(srv.URL+"/v1", "ai-key")
+	c := aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
 	t.Cleanup(func() {
 		mu.Lock()
 		called, prompt := aiCalled, lastPrompt
