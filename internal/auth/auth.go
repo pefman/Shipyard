@@ -43,13 +43,19 @@ const (
 	PollExpired  = "expired_token"
 )
 
-// DeviceCode is the response of POST /login/device/code.
+// DeviceCode is the response of POST /login/device/code. The JSON keys
+// are the wire names GitHub actually sends (asserted by the wire-
+// contract test in auth_test.go): GitHub sends expires_in, not
+// expiration.
 type DeviceCode struct {
 	DeviceCode      string `json:"device_code"`
 	UserCode        string `json:"user_code"`
 	VerificationURI string `json:"verification_uri"`
-	Expiration      int    `json:"expiration"`
-	Interval        int    `json:"interval"`
+	// VerificationURIComplete is the URI with the user code pre-filled.
+	VerificationURIComplete string `json:"verification_uri_complete,omitempty"`
+	// ExpiresIn is the device code lifetime in seconds.
+	ExpiresIn int `json:"expires_in"`
+	Interval  int `json:"interval"`
 }
 
 // Token is the success response of POST /login/oauth/access_token.
@@ -187,7 +193,9 @@ func Run(ctx context.Context, d Deps) (*Result, error) {
 
 	// A valid stored token short-circuits the whole flow.
 	if !d.Force {
-		if creds, err := LoadCredentials(path); err == nil && creds.AccessToken != "" {
+		creds, err := LoadCredentials(path)
+		switch {
+		case err == nil && creds.AccessToken != "":
 			login, verr := VerifyUser(ctx, d.httpClient(), d.apiBase(), creds.AccessToken)
 			if verr != nil {
 				if !errors.Is(verr, ErrTokenInvalid) {
@@ -200,6 +208,11 @@ func Run(ctx context.Context, d Deps) (*Result, error) {
 				fmt.Fprintf(d.out(), "already logged in as @%s (stored token valid; --force to log in again)\n", login)
 				return &Result{AlreadyLoggedIn: true, Username: login, CredentialsPath: path}, nil
 			}
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			// A file that exists but can't be read or parsed (corrupt or
+			// undecodable JSON) is neither "valid" nor "rejected" — make
+			// the fallback to the device flow visible instead of silent.
+			fmt.Fprintf(d.out(), "warning: stored credentials could not be read (%v); starting the device flow\n", err)
 		}
 	}
 
@@ -229,11 +242,9 @@ func Run(ctx context.Context, d Deps) (*Result, error) {
 		Username:     login,
 		UpdatedAt:    time.Now().UTC(),
 	}
-	// GitHub reports no refresh-token expiry in the device flow; record
-	// what we know so the metadata is honest.
-	if token.RefreshToken != "" {
-		creds.RefreshTokenExpiresAt = time.Now().UTC().Add(30 * 24 * time.Hour)
-	}
+	// GitHub reports no refresh-token expiry in the device flow, so
+	// RefreshTokenExpiresAt is deliberately left unset (zero value, and
+	// therefore omitted from the stored JSON) rather than guessed.
 	if err := SaveCredentials(configDir, creds); err != nil {
 		return nil, err
 	}
@@ -283,7 +294,7 @@ func PollForToken(ctx context.Context, hc *http.Client, base, clientID string, d
 	if interval <= 0 {
 		interval = 5
 	}
-	deadline := time.Now().Add(time.Duration(dc.Expiration) * time.Second)
+	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
 	for {
 		if time.Now().After(deadline) {
 			return nil, ErrExpiredToken

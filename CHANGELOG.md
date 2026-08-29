@@ -18,6 +18,19 @@ Notable changes to Shipyard, newest first.
   `SHIPYARD_GITHUB_CLIENT_ID` — the client ID is never hardcoded in the
   repo.
 
+### Fixed (SHI-26)
+
+- Device-code deadline now reads GitHub's real `expires_in` field (the
+  original code decoded an `expiration` field GitHub never sends, so the
+  deadline collapsed to "now" and login could never succeed against real
+  GitHub); the wire contract is pinned by a test that feeds the literal
+  GitHub-shaped response body.
+- A corrupt/unreadable stored credentials file now prints a one-line
+  warning before falling back to the device flow, instead of doing so
+  silently.
+- The refresh-token expiry metadata is no longer invented: GitHub reports
+  no refresh-token expiry in the device flow, so the field is left unset.
+
 ### Added (SHI-10)
 
 - Provider presets for the AI endpoint: `--provider` / `SHIPYARD_AI_PROVIDER`
