@@ -14,6 +14,7 @@ import (
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/repo"
 	"github.com/pefman/Shipyard/internal/solve"
 )
 
@@ -52,12 +53,15 @@ func usage() {
 	fmt.Fprint(os.Stderr, `shipyard - AI issue solver for GitHub
 
 Usage:
-  shipyard solve --repo owner/repo --issue <n> [flags]
-  shipyard listen --repo owner/repo [flags]
+  shipyard solve --repo <repo> --issue <n> [flags]
+  shipyard listen --repo <repo> [flags]
   shipyard login [flags]
 
 Solve flags:
-  --repo owner/repo      GitHub repository (required)
+  --repo <repo>          GitHub repository (required): owner/repo, or
+                         https://github.com/owner/repo, git@github.com:owner/repo,
+                         ssh://git@github.com/owner/repo, or github.com/owner/repo
+                         (a trailing .git is stripped)
   --issue <n>            Issue number to solve (required)
   --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN)
   --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
@@ -74,7 +78,8 @@ Solve flags:
   --dry-run              Stop after applying the patch: no commit, push, or PR
 
 Listen flags:
-  --repo owner/repo      GitHub repository to watch (required)
+  --repo <repo>          GitHub repository to watch (required; accepted forms
+                         like solve's --repo)
   --interval <dur>       Delay between poll passes (default 1m)
   --label <name>         Only solve issues carrying this label (repeatable)
   --state-file <path>    File tracking processed issues (default: shipyard-listen-state.json)
@@ -105,7 +110,7 @@ the command while a valid token is stored just verifies it and exits.
 
 func runSolve(args []string) error {
 	fs := flag.NewFlagSet("solve", flag.ExitOnError)
-	repo := fs.String("repo", "", "GitHub repository (owner/repo)")
+	repoFlag := fs.String("repo", "", "GitHub repository (owner/repo or a github.com URL); see usage")
 	issue := fs.Int("issue", 0, "issue number to solve")
 	githubToken := fs.String("github-token", "", "GitHub token")
 	aiProvider := fs.String("provider", "", "AI provider: openai, xai, or custom")
@@ -122,15 +127,15 @@ func runSolve(args []string) error {
 		return err
 	}
 
-	if *repo == "" {
-		return fmt.Errorf("--repo owner/repo is required")
+	if *repoFlag == "" {
+		return fmt.Errorf("--repo is required: owner/repo, a https://github.com/… URL, or git@github.com:owner/repo")
 	}
 	if *issue <= 0 {
 		return fmt.Errorf("--issue <n> is required")
 	}
-	owner, name, ok := strings.Cut(*repo, "/")
-	if !ok || owner == "" || name == "" {
-		return fmt.Errorf("invalid --repo %q: expected owner/repo", *repo)
+	owner, name, err := repo.Normalize(*repoFlag)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := config.Load(config.Raw{

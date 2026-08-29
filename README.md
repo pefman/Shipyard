@@ -206,7 +206,7 @@ Flags take precedence over environment variables.
 
 | Flag              | Environment variable      | Required | Description                                          |
 | ----------------- | ------------------------- | -------- | ---------------------------------------------------- |
-| `--repo`          | —                         | yes      | GitHub repository, `owner/repo`                      |
+| `--repo`          | —                         | yes      | GitHub repository: `owner/repo` or a github.com URL (https/ssh/scp forms) |
 | `--issue`         | —                         | yes      | Issue number to solve                                |
 | `--github-token`  | `SHIPYARD_GITHUB_TOKEN`   | yes      | GitHub token (classic PAT or fine-grained)           |
 | `--provider`      | `SHIPYARD_AI_PROVIDER`    | no       | AI provider preset: `openai`, `xai`, or `custom` (default `custom`) |
