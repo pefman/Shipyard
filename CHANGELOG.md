@@ -4,6 +4,16 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-30)
+
+- `--repo` (on `solve` and `listen`) now accepts every common GitHub
+  repository spelling, normalized by one shared `repo.Normalize`: bare
+  `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo`,
+  `ssh://git@github.com/owner/repo`, and `github.com/owner/repo`. A trailing
+  `.git` is stripped and the host is matched case-insensitively. Unrecognized
+  input errors out with the accepted forms listed; hosts other than
+  `github.com` are rejected.
+
 ### Added (SHI-29)
 
 - Built-in default GitHub OAuth App client ID (`Iv23lipRhtA8srclwbp3`) for `shipyard

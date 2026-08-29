@@ -14,6 +14,7 @@ import (
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
 	"github.com/pefman/Shipyard/internal/listen"
+	"github.com/pefman/Shipyard/internal/repo"
 )
 
 // stringFlag collects a repeatable string flag (--label a --label b).
@@ -27,7 +28,7 @@ func (s *stringFlag) Set(v string) error {
 
 func runListen(args []string) error {
 	fs := flag.NewFlagSet("listen", flag.ExitOnError)
-	repo := fs.String("repo", "", "GitHub repository to watch (owner/repo)")
+	repoFlag := fs.String("repo", "", "GitHub repository to watch (owner/repo or a github.com URL); see usage")
 	interval := fs.Duration("interval", listen.DefaultInterval, "delay between poll passes")
 	labels := &stringFlag{}
 	fs.Var(labels, "label", "only solve issues carrying this label (repeatable)")
@@ -45,12 +46,12 @@ func runListen(args []string) error {
 		return err
 	}
 
-	if *repo == "" {
-		return fmt.Errorf("--repo owner/repo is required")
+	if *repoFlag == "" {
+		return fmt.Errorf("--repo is required: owner/repo, a https://github.com/… URL, or git@github.com:owner/repo")
 	}
-	owner, name, ok := strings.Cut(*repo, "/")
-	if !ok || owner == "" || name == "" {
-		return fmt.Errorf("invalid --repo %q: expected owner/repo", *repo)
+	owner, name, err := repo.Normalize(*repoFlag)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := config.Load(config.Raw{
