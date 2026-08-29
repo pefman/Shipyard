@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // Client talks to the GitHub REST API.
@@ -93,6 +94,78 @@ func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (
 		issue.Labels = append(issue.Labels, l.Name)
 	}
 	return issue, nil
+}
+
+// ListIssues fetches the issues in owner/repo whose state matches
+// "open", "closed", or "all", most recent first, following the API
+// pagination. The GitHub issues endpoint also returns pull requests;
+// they are filtered out here so callers see plain issues only.
+func (c *Client) ListIssues(ctx context.Context, owner, repo, state string) ([]*Issue, error) {
+	const perPage = 100
+	var issues []*Issue
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("/repos/%s/%s/issues?state=%s&per_page=%d&page=%d", owner, repo, state, perPage, page)
+		resp, err := c.do(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		var raws []struct {
+			Number    int `json:"number"`
+			Title     string
+			Body      string
+			State     string
+			HTMLURL   string `json:"html_url"`
+			IsPullReq any    `json:"pull_request"` // non-nil when the entry is a pull request
+			Labels    []struct {
+				Name string `json:"name"`
+			} `json:"labels"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&raws); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("github: decoding %s: %w", path, err)
+		}
+		resp.Body.Close()
+		for _, raw := range raws {
+			if raw.IsPullReq != nil {
+				continue // the issues endpoint also returns pull requests
+			}
+			issue := &Issue{
+				Number:  raw.Number,
+				Title:   raw.Title,
+				Body:    raw.Body,
+				State:   raw.State,
+				HTMLURL: raw.HTMLURL,
+			}
+			for _, l := range raw.Labels {
+				issue.Labels = append(issue.Labels, l.Name)
+			}
+			issues = append(issues, issue)
+		}
+		if len(raws) < perPage {
+			return issues, nil
+		}
+	}
+}
+
+// ListPRs fetches the pull requests in owner/repo. head filters by head
+// ref (e.g. "owner:shipyard/issue-7"); empty means no filter. state is
+// always "all": callers checking for an existing fix branch want closed
+// and merged PRs counted as well.
+func (c *Client) ListPRs(ctx context.Context, owner, repo, head string) ([]*PR, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls?state=all", owner, repo)
+	if head != "" {
+		path += "&head=" + url.QueryEscape(head)
+	}
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var prs []*PR
+	if err := json.NewDecoder(resp.Body).Decode(&prs); err != nil {
+		return nil, fmt.Errorf("github: decoding %s: %w", path, err)
+	}
+	return prs, nil
 }
 
 // GetRepo fetches the info for owner/repo.

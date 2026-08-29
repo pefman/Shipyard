@@ -135,6 +135,50 @@ Shipyard fails fast with actionable errors for the expected failure modes:
 The raw AI response is saved to a temp file on every run, so a bad model
 answer is always inspectable.
 
+### `shipyard listen`
+
+Listens on a repository: it polls the open issues, runs the same
+solving flow as `solve` on every issue that has not been processed
+yet, and skips the rest. Designed to run unattended (e.g. in a
+container), one long-lived process per repository:
+
+```sh
+shipyard listen --repo owner/repo
+```
+
+How a pass works:
+
+1. Lists the repo's open issues (pull requests are not issues and are
+   ignored); with `--label` only issues carrying at least one of the
+   given labels are considered.
+2. Skips issues already recorded in the state file (default
+   `shipyard-listen-state.json` next to where the process runs,
+   override with `--state-file` and mount that path in a container to
+   survive restarts).
+3. As a safety net for a lost state file, checks the GitHub API for an
+   existing pull request on the issue's fix branch
+   (`shipyard/issue-<n>`) and skips those too.
+4. Runs the solving flow (clone → prompt → AI → patch → PR) for each
+   remaining issue, each on its own throwaway clone, and records it in
+   the state file as soon as it is done.
+
+Behavior notes:
+
+- One issue failing does not stop the pass; it is logged and retried
+  on a later pass.
+- `SIGINT`/`SIGTERM` shut down gracefully: the in-flight issue finishes
+  (or is aborted) and no further issue is picked up.
+- `--dry-run` applies patches but commits nothing and opens no pull
+  requests; state still records the issues (with no PR URL).
+- Every log line is prefixed with the issue number, so a long-running
+  listener is easy to follow (`journalctl`, `docker logs`, …).
+
+Useful flags: `--interval 5m` (default `1m`), `--label shipyard`,
+`--base main`, `--git-url`, `--include-files`, `--dry-run` — plus the
+same `--provider` / `--ai-endpoint` / `--ai-key` / `--ai-model`
+configuration as `solve` (the default `custom` provider needs no key,
+so a keyless local endpoint works out of the box).
+
 ## Configuration
 
 Flags take precedence over environment variables.
@@ -285,11 +329,12 @@ tests for every error path above.
 ## Project layout
 
 ```
-cmd/shipyard/          CLI entrypoint (solve command)
+cmd/shipyard/          CLI entrypoint (solve and listen commands)
 internal/config/       config resolution: flags over env vars
 internal/githubclient  GitHub REST client (repo, issues, pull requests)
 internal/aiclient/     OpenAI-compatible chat completions client
 internal/solve/        the solving flow: prompt → AI → patch → PR
+internal/listen/       listen mode: poll open issues, solve new ones
 hack/mockai/           dev-only mock AI endpoint for local end-to-end runs
 Dockerfile             multi-stage image: static binary on Alpine, non-root
 docker-compose.yml     deployment examples: one-shot solve + long-running listen
@@ -297,5 +342,4 @@ docker-compose.yml     deployment examples: one-shot solve + long-running listen
 
 ## Roadmap
 
-See the Shipyard project board: listen mode (poll for new issues) and a
-small Docker image.
+See the Shipyard project board: a small Docker image.

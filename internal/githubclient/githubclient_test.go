@@ -3,10 +3,13 @@ package githubclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -82,6 +85,125 @@ func TestGetRepo(t *testing.T) {
 	}
 	if repo.FullName != "owner/repo" || !repo.Private {
 		t.Errorf("Repo = %+v", repo)
+	}
+}
+
+func TestListIssues(t *testing.T) {
+	var (
+		gotState   string
+		gotPerPage int
+		gotPages   []string // the "page=..." query values, in order
+		mu         sync.Mutex
+	)
+	issue := func(n int, labels ...string) string {
+		ls := []string{}
+		for _, l := range labels {
+			ls = append(ls, `{"name":"`+l+`"}`)
+		}
+		return fmt.Sprintf(`{"number":%d,"title":"issue %d","state":"open","html_url":"https://github.com/owner/repo/issues/%d","labels":[%s]}`, n, n, n, strings.Join(ls, ","))
+	}
+	prEntry := `{"number":200,"title":"a PR that is not an issue","state":"open","html_url":"https://github.com/owner/repo/pull/200","pull_request":{"url":"x"}}`
+	// Page 1: 99 plain issues + 1 pull-request entry = a full page, so
+	// the client must fetch page 2.
+	var page1 []string
+	for n := 1; n <= 99; n++ {
+		page1 = append(page1, issue(n))
+	}
+	page1 = append(page1, prEntry)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/issues" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			return
+		}
+		mu.Lock()
+		gotState = r.URL.Query().Get("state")
+		gotPerPage, _ = strconv.Atoi(r.URL.Query().Get("per_page"))
+		page := r.URL.Query().Get("page")
+		gotPages = append(gotPages, page)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte("[" + strings.Join(page1, ",") + "]"))
+		default:
+			_, _ = w.Write([]byte("[" + issue(100, "bug") + "]"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "test-token")
+
+	issues, err := c.ListIssues(context.Background(), "owner", "repo", "open")
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	mu.Lock()
+	state, perPage, pages := gotState, gotPerPage, gotPages
+	mu.Unlock()
+	if state != "open" || perPage != 100 {
+		t.Errorf("query = state %q per_page %d, want open/100", state, perPage)
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Errorf("pages fetched = %v, want [1 2] (pagination until a short page)", pages)
+	}
+	if len(issues) != 100 { // 99 from page 1 + 1 from page 2, PR excluded
+		t.Fatalf("ListIssues returned %d issues, want 100 (pull requests excluded)", len(issues))
+	}
+	if issues[0].Number != 1 || len(issues[0].Labels) != 0 {
+		t.Errorf("first issue = %+v", issues[0])
+	}
+	if issues[99].Number != 100 || issues[99].Labels[0] != "bug" {
+		t.Errorf("last issue = %+v, want #100 with label bug", issues[99])
+	}
+	for _, is := range issues {
+		if is.Number == 200 {
+			t.Errorf("pull request 200 leaked into the issue list")
+		}
+	}
+}
+
+func TestListPRsHeadFilter(t *testing.T) {
+	var gotHead string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/pulls" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			return
+		}
+		gotHead = r.URL.Query().Get("head")
+		if r.URL.Query().Get("state") != "all" {
+			t.Errorf("state = %q, want all (closed PRs must count as processed)", r.URL.Query().Get("state"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"number":50,"title":"t","state":"open","html_url":"https://github.com/owner/repo/pull/50"}]`))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "test-token")
+
+	prs, err := c.ListPRs(context.Background(), "owner", "repo", "owner:shipyard/issue-7")
+	if err != nil {
+		t.Fatalf("ListPRs: %v", err)
+	}
+	if len(prs) != 1 || prs[0].Number != 50 {
+		t.Errorf("PRs = %+v", prs)
+	}
+	if gotHead != "owner:shipyard/issue-7" {
+		t.Errorf("server saw head=%q, want owner:shipyard/issue-7", gotHead)
+	}
+}
+
+func TestListPRsNone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "test-token")
+
+	prs, err := c.ListPRs(context.Background(), "owner", "repo", "")
+	if err != nil {
+		t.Fatalf("ListPRs: %v", err)
+	}
+	if len(prs) != 0 {
+		t.Errorf("PRs = %+v, want none", prs)
 	}
 }
 
