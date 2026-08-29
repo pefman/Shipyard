@@ -13,6 +13,77 @@ go build ./...
 go build -o shipyard ./cmd/shipyard
 ```
 
+## Docker deployment
+
+The repo ships a multi-stage Dockerfile: a full Go toolchain builds a
+static binary (`CGO_ENABLED=0`), and the runtime image is a small Alpine
+base with just `git` and CA certificates — no build tools, running as the
+unprivileged `shipyard` user. The image is designed to stay well under 50 MB
+(`git` is the heaviest component); check `docker images shipyard` after a
+build.
+
+The image always builds the full repo, so every command and flag that is
+merged into `main` (today: `solve`; once SHI-6 lands: `listen`) is included
+in a rebuild.
+
+### Build
+
+```sh
+docker build -t shipyard .
+# or
+docker compose build
+```
+
+### One-shot solve
+
+Plain `docker run`:
+
+```sh
+docker run --rm \
+  -e SHIPYARD_GITHUB_TOKEN="$SHIPYARD_GITHUB_TOKEN" \
+  -e SHIPYARD_AI_ENDPOINT=http://localhost:8080 \
+  -e SHIPYARD_AI_KEY="${SHIPYARD_AI_KEY:-}" \
+  shipyard solve --repo owner/repo --issue 42
+```
+
+Or via the bundled compose file (`docker-compose.yml`), which reads the
+same environment variables:
+
+```sh
+export SHIPYARD_REPO=owner/repo SHIPYARD_ISSUE=42
+export SHIPYARD_GITHUB_TOKEN=... SHIPYARD_AI_ENDPOINT=... SHIPYARD_AI_KEY=...
+docker compose run --rm solve
+# extra flags go after `--`:
+docker compose run --rm solve -- --dry-run --include-files path/to/file.go
+```
+
+For a custom (unauthenticated) endpoint like `http://localhost:8080` the
+`SHIPYARD_AI_KEY` variable may be left empty; provider presets
+(`--provider openai|xai`, SHI-10) use the same variables once merged.
+`SHIPYARD_GITHUB_API` can point the GitHub API at a GHE instance.
+
+### Listen mode (long-running)
+
+Once [listen mode (SHI-6)](https://github.com/pefman/Shipyard/pull/5) is
+merged into `main` and the image rebuilt, the same image can run a
+long-lived listener that polls the repo's open issues and solves new ones:
+
+```sh
+# compose (state volume keeps track of processed issues across restarts)
+docker compose --profile listen up -d
+
+# or plain docker run
+docker run -d --name shipyard-listen --restart unless-stopped \
+  -v shipyard-state:/data \
+  -e SHIPYARD_GITHUB_TOKEN=... -e SHIPYARD_AI_ENDPOINT=... \
+  shipyard listen --repo owner/repo --interval 5m
+```
+
+The listener keeps its state file in `/data` (override with
+`--state-file`); mount a volume there so a container restart does not
+re-solve issues. Use `--label` to only solve labeled issues and
+`--dry-run` to apply patches without committing or opening PRs.
+
 ## Command
 
 ### `shipyard solve`
@@ -176,6 +247,8 @@ internal/githubclient  GitHub REST client (repo, issues, pull requests)
 internal/aiclient/     OpenAI-compatible chat completions client
 internal/solve/        the solving flow: prompt → AI → patch → PR
 hack/mockai/           dev-only mock AI endpoint for local end-to-end runs
+Dockerfile             multi-stage image: static binary on Alpine, non-root
+docker-compose.yml     deployment examples: one-shot solve + long-running listen
 ```
 
 ## Roadmap

@@ -1,0 +1,52 @@
+# Shipyard deployment examples.
+#
+# One-shot solve (the `solve` service is the compose default; pass extra
+# flags after `--` to override the command):
+#
+#   export SHIPYARD_GITHUB_TOKEN=... SHIPYARD_AI_ENDPOINT=... SHIPYARD_AI_KEY=...
+#   export SHIPYARD_REPO=owner/repo SHIPYARD_ISSUE=42
+#   docker compose run --rm solve
+#   docker compose run --rm solve -- --repo owner/repo --issue 42 --dry-run
+#
+# Long-running listener (listen mode ships with SHI-6,
+# https://github.com/pefman/Shipyard/pull/5; rebuild the image once it is
+# merged into main):
+#
+#   docker compose --profile listen up -d
+#
+# The listener keeps a state file in /data so already-processed issues
+# survive container restarts.
+
+services:
+  solve:
+    build: .
+    image: shipyard:local
+    command: ["solve", "--repo", "${SHIPYARD_REPO:-owner/repo}", "--issue", "${SHIPYARD_ISSUE:-1}"]
+    environment:
+      SHIPYARD_GITHUB_TOKEN: "${SHIPYARD_GITHUB_TOKEN:?set SHIPYARD_GITHUB_TOKEN}"
+      SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
+      SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
+      SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
+
+  listen:
+    build: .
+    image: shipyard:local
+    profiles: ["listen"]
+    restart: unless-stopped
+    command:
+      [
+        "listen",
+        "--repo", "${SHIPYARD_REPO:-owner/repo}",
+        "--interval", "5m",
+        "--state-file", "/data/shipyard-listen-state.json",
+      ]
+    environment:
+      SHIPYARD_GITHUB_TOKEN: "${SHIPYARD_GITHUB_TOKEN:?set SHIPYARD_GITHUB_TOKEN}"
+      SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
+      SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
+      SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
+    volumes:
+      - shipyard-state:/data
+
+volumes:
+  shipyard-state:
