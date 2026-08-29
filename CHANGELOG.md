@@ -4,6 +4,14 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-29)
+
+- Built-in default GitHub OAuth App client ID (`Iv23lipRhtA8srclwbp3`) for `shipyard
+  login`: login now works with zero configuration, exactly like
+  `gh auth login`. Precedence: `--github-client-id` flag >
+  `SHIPYARD_GITHUB_CLIENT_ID` env > built-in default, so anyone with their
+  own OAuth App can still override.
+
 ### Added (SHI-26)
 
 - `shipyard login`: GitHub OAuth device flow. Passes the verification URI
@@ -14,9 +22,8 @@ Notable changes to Shipyard, newest first.
   `~/.config/shipyard/credentials.json`) with 0600 permissions, written
   atomically. Re-running `login` with a valid stored token just verifies
   it and exits; `--force` (or an invalid stored token) re-does the flow.
-- OAuth App client ID comes from `--github-client-id` /
-  `SHIPYARD_GITHUB_CLIENT_ID` — the client ID is never hardcoded in the
-  repo.
+- OAuth App client ID: `--github-client-id` / `SHIPYARD_GITHUB_CLIENT_ID`
+  override the built-in pre-registered app (added by SHI-29).
 
 ### Fixed (SHI-26)
 
