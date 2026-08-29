@@ -264,6 +264,24 @@ func TestSolveE2EClone(t *testing.T) {
 	}
 }
 
+func TestSolveBranchCollision(t *testing.T) {
+	gitAvailable(t)
+	bare, workdir := newFakeRemote(t)
+	gh := newFakeGitHub(t, bare)
+	ai := newFakeAI(t, seedResponse)
+	opts := Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir}
+
+	// First run delivers the branch; the second run with the same name
+	// must fail with a clear error instead of a confusing push rejection.
+	if _, err := Solve(context.Background(), newDeps(gh, ai, t), opts); err != nil {
+		t.Fatalf("first Solve: %v", err)
+	}
+	_, err := Solve(context.Background(), newDeps(gh, ai, t), opts)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second Solve: want already-exists error, got %v", err)
+	}
+}
+
 func TestSolveE2ENoUsableChanges(t *testing.T) {
 	gitAvailable(t)
 	_, workdir := newFakeRemote(t)

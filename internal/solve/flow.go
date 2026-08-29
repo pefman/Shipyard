@@ -137,6 +137,9 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return nil, fmt.Errorf("committing changes: %w", err)
 	}
 	log("committed on %s", branch)
+	if refs, _ := git.Run(ctx, workdir, "ls-remote", "--heads", "origin", branch); strings.TrimSpace(refs) != "" {
+		return nil, fmt.Errorf("remote branch %s already exists (probably from a previous run); delete it or pass --branch to use a different name", branch)
+	}
 	if _, err := git.Run(ctx, workdir, "push", "-u", "origin", branch); err != nil {
 		return nil, fmt.Errorf("pushing branch %s: %w (check that the GitHub token can push to %s/%s)", branch, err, o.Owner, o.Repo)
 	}

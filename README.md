@@ -59,6 +59,7 @@ Shipyard fails fast with actionable errors for the expected failure modes:
 | 401 from the GitHub API | `check that the GitHub token is valid and not expired` |
 | 403 from the GitHub API (e.g. opening the PR) | `this token is missing the permissions GitHub needs here (…)` |
 | `--workdir` has uncommitted changes | `has uncommitted changes; commit or stash them first` |
+| Remote branch name already taken (previous run) | `remote branch … already exists; … pass --branch` |
 
 The raw AI response is saved to a temp file on every run, so a bad model
 answer is always inspectable.
