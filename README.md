@@ -59,7 +59,7 @@ docker compose run --rm solve -- --dry-run --include-files path/to/file.go
 
 For a custom (unauthenticated) endpoint like `http://localhost:8080` the
 `SHIPYARD_AI_KEY` variable may be left empty; provider presets
-(`--provider openai|xai`, SHI-10) use the same variables once merged.
+(`--provider openai|xai`) use the same variables.
 `SHIPYARD_GITHUB_API` can point the GitHub API at a GHE instance.
 
 ### Listen mode (long-running)
@@ -172,12 +172,25 @@ model, so provider switches are one flag apart:
   endpoint such as `http://localhost:8080` needs none.
 
 `--ai-model` / `SHIPYARD_AI_MODEL` overrides the preset's default model in
-all cases. One-line examples:
+all cases. The API key is resolved in this order: `--ai-key` flag, then the
+provider's own variable (`SHIPYARD_OPENAI_KEY` / `SHIPYARD_XAI_KEY`), then
+the generic `SHIPYARD_AI_KEY`. Copy-pasteable examples per provider:
 
 ```sh
+# ChatGPT (OpenAI) — preset pins the base URL and default model
+export SHIPYARD_OPENAI_KEY=...
 shipyard solve --repo owner/repo --issue 42 --provider openai
+
+# Grok (xAI)
+export SHIPYARD_XAI_KEY=...
 shipyard solve --repo owner/repo --issue 42 --provider xai
-shipyard solve --repo owner/repo --issue 42 --ai-endpoint http://localhost:8080
+
+# A different model on the same provider
+shipyard solve --repo owner/repo --issue 42 --provider openai --ai-model <model-name>
+
+# Local/self-hosted OpenAI-compatible endpoint, no key needed
+shipyard solve --repo owner/repo --issue 42 \
+  --provider custom --ai-endpoint http://localhost:8080
 ```
 
 ### GitHub token
@@ -190,7 +203,9 @@ clone.
 ### AI endpoint
 
 Any OpenAI-compatible `/chat/completions` endpoint works —
-`POST <endpoint>/chat/completions` with a `Bearer` API key, JSON request
+`POST <endpoint>/chat/completions` with a `Bearer` API key when a key is
+configured (a keyless `custom` endpoint sends no Authorization header),
+JSON request
 `{"model": ..., "messages": [{"role": "user", "content": ...}]}`, and the
 first choice's `message.content` is used as the response text. The response
 should contain a unified diff in a fenced code block; anything else is
@@ -223,28 +238,34 @@ EOF
 
 go run ./hack/mockai --port 8765 --response-file /tmp/canned.txt &
 
+# `custom` providers need no key: the mock is just another OpenAI-compatible
+# server
 shipyard solve --repo <owner>/<test-repo> --issue <n> \
   --github-token "$SHIPYARD_GITHUB_TOKEN" \
-  --ai-endpoint http://127.0.0.1:8765/v1 --ai-key anything \
+  --provider custom --ai-endpoint http://127.0.0.1:8765/v1 \
   --dry-run   # try dry-run first; drop it to open a real PR
 ```
 
 Use a dedicated test repo + a test issue for this: the canned patch only
 matches files that exist in that repo.
 
-### 2. Real run (once the AI endpoint is configured)
+### 2. Real run (once an AI provider is configured)
 
 ```sh
 export SHIPYARD_GITHUB_TOKEN=...
-export SHIPYARD_AI_ENDPOINT=https://api.openai.com/v1   # or any compatible endpoint
-export SHIPYARD_AI_KEY=...
+export SHIPYARD_OPENAI_KEY=...   # or SHIPYARD_XAI_KEY for Grok
+
+# The preset pins the endpoint and default model. The generic variables
+# still work for any OpenAI-compatible server: SHIPYARD_AI_ENDPOINT +
+# SHIPYARD_AI_KEY
 
 # First check what the AI would do: no commit/push/PR, patch saved to a file
-shipyard solve --repo owner/repo --issue 42 --dry-run \
+shipyard solve --repo owner/repo --issue 42 --provider openai --dry-run \
   --include-files path/to/affected/file.py
 
-# Then deliver for real
-shipyard solve --repo owner/repo --issue 42 --include-files path/to/affected/file.py
+# Then deliver for real (override the preset's model if you like)
+shipyard solve --repo owner/repo --issue 42 --provider openai \
+  --include-files path/to/affected/file.py
 ```
 
 The printed pull request URL is where the result is reviewed.
