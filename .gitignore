@@ -1,0 +1,7 @@
+# Binaries
+/shipyard
+/dist/
+
+# Editor / OS noise
+*.swp
+.DS_Store
