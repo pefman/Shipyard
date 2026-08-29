@@ -92,7 +92,7 @@ Listen flags:
 
 Login flags:
   --github-client-id <id> GitHub OAuth App client ID (env SHIPYARD_GITHUB_CLIENT_ID;
-                          required — never hardcoded, so no token can be baked in)
+                          default: the built-in pre-registered app — login works with zero config)
   --force                Redo the device flow even if a valid stored token exists
 
 The device flow prints a verification URI and a one-time code; after you

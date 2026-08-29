@@ -86,6 +86,27 @@ re-solve issues. Use `--label` to only solve labeled issues and
 
 ## Command
 
+### `shipyard login`
+
+Authenticates with GitHub via the OAuth device flow. Works out of the box —
+shipyard ships a pre-registered GitHub OAuth App (client ID `4764331`), so
+no flags or environment variables are needed:
+
+```sh
+shipyard login
+```
+
+To use your own GitHub OAuth App instead, override the client ID with
+`--github-client-id` or `SHIPYARD_GITHUB_CLIENT_ID` (flag wins over the
+environment variable).
+
+The flow prints a verification URI and a one-time code; after you authorize
+at the URI, the access token is verified via `GET /user` and stored at
+`$XDG_CONFIG_HOME/shipyard/credentials.json` (default
+`~/.config/shipyard/credentials.json`) with `0600` permissions. Re-running
+`login` while a valid token is stored just verifies it and exits;
+`--force` re-does the device flow.
+
 ### `shipyard solve`
 
 Solves one GitHub issue in a single shot:
