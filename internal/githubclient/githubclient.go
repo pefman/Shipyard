@@ -42,10 +42,10 @@ type Repo struct {
 
 // PRRequest is a pull request creation request.
 type PRRequest struct {
-	Title string
-	Head  string
-	Base  string
-	Body  string
+	Title string `json:"title"`
+	Head  string `json:"head"`
+	Base  string `json:"base"`
+	Body  string `json:"body"`
 }
 
 // PR is the subset of a GitHub pull request the solving flow needs.

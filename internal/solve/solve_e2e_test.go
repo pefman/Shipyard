@@ -74,6 +74,18 @@ func newFakeGitHub(t *testing.T, cloneURL string) *fakeGitHub {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		body, _ := io.ReadAll(r.Body)
+		// Decode from the raw wire format (not the Go struct): the
+		// previous version mirrored the struct's field names and masked
+		// a missing-json-tags bug.
+		var raw map[string]string
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Errorf("pull request payload is not a JSON object: %v", err)
+		}
+		for _, k := range []string{"title", "head", "base", "body"} {
+			if _, ok := raw[k]; !ok {
+				t.Errorf("pull request payload missing lowercase key %q: %s", k, body)
+			}
+		}
 		var pr githubclient.PRRequest
 		_ = json.Unmarshal(body, &pr)
 		f.pulls = append(f.pulls, pr)

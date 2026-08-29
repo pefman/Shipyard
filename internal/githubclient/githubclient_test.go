@@ -3,6 +3,7 @@ package githubclient
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,13 +105,17 @@ func TestCreatePR(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		gotAuth = r.Header.Get("Authorization")
-		var req struct {
-			Title, Head, Base, Body string
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]string
+		if err := json.Unmarshal(body, &raw); err != nil {
 			t.Fatalf("decoding pull request payload: %v", err)
 		}
-		gotTitle, gotHead, gotBase, gotBody = req.Title, req.Head, req.Base, req.Body
+		// Assert on the raw lowercase wire keys so the test catches
+		// missing json tags on PRRequest.
+		gotTitle, gotHead, gotBase, gotBody = raw["title"], raw["head"], raw["base"], raw["body"]
+		if raw["head"] == "" || raw["base"] == "" {
+			t.Errorf("pull request payload missing head/base: %s", body)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"number": 42, "title": "Fix #7: Broken login", "state": "open", "html_url": "https://github.com/owner/repo/pull/42"}`))
 	}))
