@@ -111,7 +111,7 @@ func (m *mockServer) deviceFlow(t *testing.T) {
 		DeviceCode:      "dev-code",
 		UserCode:        "ABCD-1234",
 		VerificationURI: "https://github.com/login/device",
-		Expiration:      900,
+		ExpiresIn:       900,
 		Interval:        5,
 	}
 	m.poll = []pollScript{{token: Token{AccessToken: "new-tok", TokenType: "bearer", Scope: "read:user"}}}
@@ -141,6 +141,71 @@ func TestRequestDeviceCode(t *testing.T) {
 	}
 }
 
+func TestRequestDeviceCodeWireContract(t *testing.T) {
+	// The literal wire shape GitHub actually returns from
+	// POST /login/device/code, per the official OAuth device-flow docs.
+	// Feeding the real payload — instead of re-encoding our own Go
+	// struct — pins the JSON tags to the real contract: this test
+	// fails if a tag drifts from what GitHub sends (e.g. the original
+	// B1 bug, where "expiration" matched nothing and the deadline
+	// collapsed to "now").
+	const githubBody = `{
+		"device_code": "AQ~UCJ2wXfLc",
+		"user_code": "WDJB-MJHT",
+		"verification_uri": "https://github.com/login/device",
+		"verification_uri_complete": "https://github.com/login/device?user_code=WDJB-MJHT",
+		"expires_in": 899,
+		"interval": 5
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/login/device/code" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, githubBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	code, err := RequestDeviceCode(context.Background(), srv.Client(), srv.URL+"/login", "cid-wire")
+	if err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	if code.DeviceCode != "AQ~UCJ2wXfLc" {
+		t.Errorf("DeviceCode = %q", code.DeviceCode)
+	}
+	if code.UserCode != "WDJB-MJHT" {
+		t.Errorf("UserCode = %q", code.UserCode)
+	}
+	if code.VerificationURI != "https://github.com/login/device" {
+		t.Errorf("VerificationURI = %q", code.VerificationURI)
+	}
+	if code.VerificationURIComplete != "https://github.com/login/device?user_code=WDJB-MJHT" {
+		t.Errorf("VerificationURIComplete = %q", code.VerificationURIComplete)
+	}
+	if code.ExpiresIn != 899 {
+		t.Errorf("ExpiresIn = %d, want 899 (B1: a wrong tag decodes 0)", code.ExpiresIn)
+	}
+	if code.Interval != 5 {
+		t.Errorf("Interval = %d, want 5", code.Interval)
+	}
+
+	// B1 regression: a code decoded from a GitHub-shaped body must not
+	// let PollForToken expire before the first poll.
+	mock := &mockServer{}
+	mock.deviceCode = *code
+	mock.poll = []pollScript{{code: PollPending}, {token: Token{AccessToken: "tok"}}}
+	msrv := mock.start(t)
+
+	token, err := PollForToken(context.Background(), msrv.Client(), msrv.URL+"/login", "cid-wire", code, fastSleep(&nilSleeps))
+	if err != nil {
+		t.Fatalf("PollForToken: %v (deadline from expires_in must not already be elapsed)", err)
+	}
+	if token.AccessToken != "tok" {
+		t.Errorf("token = %+v", token)
+	}
+}
+
 func TestPollPendingSlowDownSuccess(t *testing.T) {
 	m := &mockServer{}
 	m.deviceFlow(t)
@@ -154,7 +219,7 @@ func TestPollPendingSlowDownSuccess(t *testing.T) {
 
 	var sleeps []time.Duration
 	token, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
-		&DeviceCode{DeviceCode: "dev-code", Interval: 5, Expiration: 900}, fastSleep(&sleeps))
+		&DeviceCode{DeviceCode: "dev-code", Interval: 5, ExpiresIn: 900}, fastSleep(&sleeps))
 	if err != nil {
 		t.Fatalf("PollForToken: %v", err)
 	}
@@ -185,7 +250,7 @@ func TestPollAccessDenied(t *testing.T) {
 	srv := m.start(t)
 
 	_, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
-		&DeviceCode{Interval: 5, Expiration: 900}, fastSleep(&nilSleeps))
+		&DeviceCode{Interval: 5, ExpiresIn: 900}, fastSleep(&nilSleeps))
 	if !errors.Is(err, ErrAccessDenied) {
 		t.Fatalf("err = %v, want ErrAccessDenied", err)
 	}
@@ -198,7 +263,7 @@ func TestPollExpiredToken(t *testing.T) {
 	srv := m.start(t)
 
 	_, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
-		&DeviceCode{Interval: 5, Expiration: 900}, fastSleep(&nilSleeps))
+		&DeviceCode{Interval: 5, ExpiresIn: 900}, fastSleep(&nilSleeps))
 	if !errors.Is(err, ErrExpiredToken) {
 		t.Fatalf("err = %v, want ErrExpiredToken", err)
 	}
@@ -210,7 +275,7 @@ func TestPollDeadlineExpiry(t *testing.T) {
 	srv := m.start(t)
 
 	_, err := PollForToken(context.Background(), srv.Client(), srv.URL+"/login", "cid-test",
-		&DeviceCode{Interval: 5, Expiration: 0}, fastSleep(&nilSleeps))
+		&DeviceCode{Interval: 5, ExpiresIn: 0}, fastSleep(&nilSleeps))
 	if !errors.Is(err, ErrExpiredToken) {
 		t.Fatalf("err = %v, want ErrExpiredToken", err)
 	}
@@ -364,6 +429,49 @@ func TestRunForceRerunsDeviceFlow(t *testing.T) {
 		t.Errorf("device code requested %d times with --force, want 1", m.deviceCalls)
 	}
 	saved, err := LoadCredentials(filepath.Join(dir, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.AccessToken != "new-tok" {
+		t.Errorf("stored access token = %q, want new-tok", saved.AccessToken)
+	}
+}
+
+func TestRunCorruptCredentialsWarns(t *testing.T) {
+	m := &mockServer{}
+	m.deviceFlow(t)
+	m.user = []userScript{{login: "pefman"}}
+	srv := m.start(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	res, err := Run(context.Background(), Deps{
+		ClientID:  "cid-test",
+		LoginBase: srv.URL + "/login",
+		APIBase:   srv.URL,
+		ConfigDir: dir,
+		Sleep:     fastSleep(&nilSleeps),
+		Out:       &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AlreadyLoggedIn {
+		t.Error("AlreadyLoggedIn = true from a corrupt credentials file")
+	}
+	if !strings.Contains(out.String(), "warning") {
+		t.Errorf("out = %q, want a warning about the unreadable credentials file", out.String())
+	}
+	if !strings.Contains(out.String(), "Logged in as @pefman") {
+		t.Errorf("out = %q, want the successful login line after the warning", out.String())
+	}
+	// The device flow must have run and replaced the corrupt file.
+	saved, err := LoadCredentials(path)
 	if err != nil {
 		t.Fatal(err)
 	}
