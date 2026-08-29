@@ -287,8 +287,10 @@ func RequestDeviceCode(ctx context.Context, hc *http.Client, base, clientID stri
 
 // PollForToken polls /login/oauth/access_token until the user authorizes
 // (success), denies, the code expires, or the deadline from
-// dc.Expiration is reached. sleep is called between polls — its duration
-// grows by 5s on every slow_down, per the OAuth device flow spec.
+// dc.ExpiresIn is reached. Pending-style responses (authorization_pending,
+// whatever field they arrive in) are never terminal. sleep is called
+// between polls — its duration grows by 5s on every slow_down, per the
+// OAuth device flow spec.
 func PollForToken(ctx context.Context, hc *http.Client, base, clientID string, dc *DeviceCode, sleep func(time.Duration)) (*Token, error) {
 	interval := dc.Interval
 	if interval <= 0 {
@@ -317,7 +319,10 @@ func PollForToken(ctx context.Context, hc *http.Client, base, clientID string, d
 			return nil, err
 		}
 		var out struct {
-			Code string `json:"code"` // GitHub uses "code" for poll outcomes
+			// GitHub's poll outcomes arrive in the OAuth-spec "error"
+			// field (verified against live responses) — the docs also
+			// mention "code" — so both are accepted below.
+			Code string `json:"code"`
 			Err  string `json:"error"`
 			Token
 		}
@@ -331,26 +336,31 @@ func PollForToken(ctx context.Context, hc *http.Client, base, clientID string, d
 			return nil, fmt.Errorf("github: polling for token: %s: %s", resp.Status, string(body))
 		}
 
-		switch out.Code {
+		// Live GitHub responses carry the poll outcome in the
+		// "error" field; the docs also show "code". Accept both —
+		// pending-style outcomes are NOT terminal and must keep
+		// polling, whatever field they arrive in.
+		status := out.Code
+		if status == "" {
+			status = out.Err
+		}
+		switch status {
 		case "":
-			// No poll code: either a token or an OAuth-spec "error" field.
 			if out.Token.AccessToken != "" {
 				return &out.Token, nil
-			}
-			if out.Err != "" {
-				return nil, fmt.Errorf("github: polling for token: %s", out.Err)
 			}
 			return nil, fmt.Errorf("github: token response has no access_token: %s", string(body))
 		case PollPending:
 			// Keep polling at the current interval.
 		case PollSlowDown:
+			// Not an error: slow the polling down by 5s and continue.
 			interval += 5
 		case PollDenied:
 			return nil, ErrAccessDenied
 		case PollExpired:
 			return nil, ErrExpiredToken
 		default:
-			return nil, &PollError{Code: out.Code}
+			return nil, &PollError{Code: status}
 		}
 
 		sleep(time.Duration(interval) * time.Second)

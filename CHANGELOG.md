@@ -37,6 +37,14 @@ Notable changes to Shipyard, newest first.
   silently.
 - The refresh-token expiry metadata is no longer invented: GitHub reports
   no refresh-token expiry in the device flow, so the field is left unset.
+- Token polling now accepts the poll outcome in GitHub's real OAuth-spec
+  `error` field (previously only the documented `code` field was
+  recognized, so a live `authorization_pending` response was treated as
+  fatal and the flow terminated before the user could authorize;
+  `authorization_pending` and `slow_down` are non-terminal again,
+  whatever field they arrive in).
+- Ctrl-C / SIGTERM during the wait now exits cleanly with
+  "shipyard: login interrupted" instead of a token-poll error.
 
 ### Added (SHI-10)
 
