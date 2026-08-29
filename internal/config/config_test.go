@@ -143,8 +143,8 @@ func TestLoad(t *testing.T) {
 				AIKey: "flag-key", AIModel: "gpt-5.6-sol", GitHubAPIRoot: ghAPI},
 		},
 		{
-			name: "unknown provider errors",
-			raw:  Raw{Provider: "anthropic"},
+			name:    "unknown provider errors",
+			raw:     Raw{Provider: "anthropic"},
 			wantErr: "unknown AI provider \"anthropic\": expected openai, xai, or custom",
 		},
 		{
