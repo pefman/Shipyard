@@ -439,7 +439,7 @@ func TestRunOnceCorruptStateFileFails(t *testing.T) {
 }
 
 // TestRunRefusesUnguarded: with neither a repo nor a label allowlist
-// set, a run that has not been acknowledged with
+// set, a live run that has not been acknowledged with
 // --i-know-this-is-unguarded is refused before it does any work.
 func TestRunRefusesUnguarded(t *testing.T) {
 	gh := newFakeGitHub(t, testIssues)
@@ -453,6 +453,121 @@ func TestRunRefusesUnguarded(t *testing.T) {
 		t.Errorf("%d pull request(s) created by a refused run, want 0", n)
 	}
 	gh.mu.Unlock()
+}
+
+// TestRunDryRunUnguardedProceeds: a dry run commits nothing and opens
+// no pull requests, so it starts with no allowlist and no
+// acknowledgment — this is the safe default for a fresh installation.
+func TestRunDryRunUnguardedProceeds(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- d.Run(ctx, Options{
+			Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+			Interval: 10 * time.Millisecond,
+			DryRun:   true,
+		})
+	}()
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v after cancellation, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after the context was canceled")
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 0 {
+		t.Errorf("%d pull request(s) created by a dry run, want 0", n)
+	}
+	gh.mu.Unlock()
+}
+
+// lineLog collects the run's log lines in order.
+type lineLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *lineLog) printf(format string, args ...any) {
+	l.mu.Lock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+	l.mu.Unlock()
+}
+
+func (l *lineLog) first() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.lines) == 0 {
+		return ""
+	}
+	return l.lines[0]
+}
+
+// TestRunLiveModeAuditLineFirst: in live mode the very first log line
+// is the guardrails audit line (mode, allowlists, pull-request budget),
+// so a long-running container's first line is an audit line.
+func TestRunLiveModeAuditLineFirst(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	log := &lineLog{}
+	d := newTestDeps(t, gh, fakeGit{})
+	d.Log = log.printf
+
+	err := d.Run(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Labels: []string{"bug"},
+		MaxPRs: 1, // the run stops on its own once the budget is spent
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	first := log.first()
+	if !strings.HasPrefix(first, "live mode: guardrails: labels: bug; max-prs: 1") {
+		t.Errorf("first log line = %q, want the live-mode guardrails audit line", first)
+	}
+}
+
+// TestRunDryRunModeAuditLineFirst: a dry run announces its mode and the
+// (inert) guardrails as its first log line, and makes explicit how to
+// go live.
+func TestRunDryRunModeAuditLineFirst(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	log := &lineLog{}
+	d := newTestDeps(t, gh, fakeGit{})
+	d.Log = log.printf
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- d.Run(ctx, Options{
+			Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+			Interval: 10 * time.Millisecond,
+			DryRun:   true,
+		})
+	}()
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v after cancellation, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after the context was canceled")
+	}
+	first := log.first()
+	if !strings.HasPrefix(first, "dry-run mode:") {
+		t.Errorf("first log line = %q, want the dry-run mode audit line", first)
+	}
+	if !strings.Contains(first, "SHIPYARD_MODE=live") {
+		t.Errorf("dry-run audit line should tell the operator how to go live: %q", first)
+	}
 }
 
 // TestRunUnguardedWithFlagProceeds: the same configuration with the

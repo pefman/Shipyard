@@ -13,21 +13,24 @@ func TestApplyGuardrailsResolution(t *testing.T) {
 	t.Setenv("SHIPYARD_REPOS", "")
 	t.Setenv("SHIPYARD_LABELS", "")
 	t.Setenv("SHIPYARD_MAX_PRS", "")
+	t.Setenv("SHIPYARD_MODE", "")
 
 	g := guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true, maxPRsFlag: -1}
 
-	// Neither flag nor environment: unguarded, so without the
-	// acknowledgment flag it is refused even though a dry run would not
-	// open anything — the flag is how the operator takes responsibility.
-	if _, max, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true, unguarded: true, maxPRsFlag: -1}); err != nil {
-		t.Fatalf("unguarded run acknowledged with the flag: %v", err)
+	// An unguarded dry run opens nothing, so it needs no acknowledgment
+	// and the default pull-request budget.
+	if _, max, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true, maxPRsFlag: -1}); err != nil {
+		t.Fatalf("unguarded dry run: %v, want it to be accepted", err)
 	} else if max != 3 {
 		t.Errorf("max-prs = %d, want the default 3", max)
 	}
-	// Without the flag the same configuration is refused.
-	_, _, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true})
-	if !errors.Is(err, guardrails.ErrUnguarded) {
-		t.Fatalf("unguarded run without the flag: %v, want the unguarded refusal", err)
+	// An unguarded live run without the flag is refused ...
+	if _, _, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: false, quiet: true, maxPRsFlag: -1}); !errors.Is(err, guardrails.ErrUnguarded) {
+		t.Fatalf("unguarded live run without the flag: %v, want the unguarded refusal", err)
+	}
+	// ... but the acknowledgment flag lets it proceed.
+	if _, _, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: false, quiet: true, unguarded: true, maxPRsFlag: -1}); err != nil {
+		t.Fatalf("unguarded live run acknowledged with the flag: %v", err)
 	}
 
 	// Environment fallbacks.
@@ -67,7 +70,7 @@ func TestApplyGuardrailsResolution(t *testing.T) {
 
 	// A live run with a zero budget is refused.
 	t.Setenv("SHIPYARD_MAX_PRS", "")
-	if _, _, err := applyGuardrails(guardrailInput{maxPRsFlag: 0, owner: "towner", repo: "trepo", dryRun: false, quiet: true}); err == nil {
+	if _, _, err := applyGuardrails(guardrailInput{maxPRsFlag: 0, owner: "towner", repo: "trepo", dryRun: false, unguarded: true, quiet: true}); err == nil {
 		t.Error("live run with --max-prs 0: expected an error")
 	}
 }
