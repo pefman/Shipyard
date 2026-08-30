@@ -11,7 +11,10 @@ import "strings"
 // Known families are matched on the image name prefix, so pinned tags
 // like golang:1.23 keep working:
 //
-//	golang  →  go build ./... ; go test ./...
+//	golang  →  go build -o /dev/null ./... (writes no binary — a plain
+//	           `go build ./...` would drop one into the module root of a
+//	           single-main-package repo and the host-side `git add -A`
+//	           would commit it) ; go test ./...
 //	python  →  python -m compileall -q . (bytecode compile; __pycache__
 //	           artifacts are removed again so the host-side commit does
 //	           not pick them up)
@@ -22,7 +25,7 @@ import "strings"
 func FixCommands(image string) []string {
 	switch {
 	case strings.HasPrefix(image, "golang"):
-		return []string{"go build ./...", "go test ./..."}
+		return []string{"go build -o /dev/null ./...", "go test ./..."}
 	case strings.HasPrefix(image, "python"):
 		return []string{
 			"python -m compileall -q .",

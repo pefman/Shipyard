@@ -10,8 +10,8 @@ func TestFixCommands(t *testing.T) {
 		image string
 		want  []string
 	}{
-		{"golang:1.22", []string{"go build ./...", "go test ./..."}},
-		{"golang:1.23", []string{"go build ./...", "go test ./..."}}, // pinned tags keep working
+		{"golang:1.22", []string{"go build -o /dev/null ./...", "go test ./..."}},
+		{"golang:1.23", []string{"go build -o /dev/null ./...", "go test ./..."}}, // pinned tags keep working
 		{"python:3.12", []string{
 			"python -m compileall -q .",
 			"find . -type d -name __pycache__ -prune -exec rm -rf {} +",

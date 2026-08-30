@@ -237,7 +237,7 @@ Resolution order:
 
    | Marker file | Image | Verification steps run in it |
    | ----------- | ----- | ---------------------------- |
-   | `go.mod` | `golang:1.22` | `go build ./…`, `go test ./…` |
+   | `go.mod` | `golang:1.22` | `go build -o /dev/null ./…` (no binary is written), `go test ./…` |
    | `pyproject.toml` / `requirements.txt` | `python:3.12` | bytecode compile of all `.py` files |
    | `package.json` | `node:20` | `npm install`, `npm test` (skipped when the package defines no test script) |
    | `Cargo.toml` | `rust:1.79` | `cargo build`, `cargo test` |

@@ -9,13 +9,18 @@ package listen
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
 	"github.com/pefman/Shipyard/internal/solve"
 )
@@ -102,6 +107,101 @@ func (b *solveLogBuf) has(s string) bool {
 }
 
 func newSolveLog() *solveLogBuf { return &solveLogBuf{} }
+
+// TestSolveLiveGoRepoLeavesNoBuildArtifacts is the regression test for
+// the B1 review finding: the seed repo is a single `package main` at
+// the module root, so a plain `go build ./...` verification step would
+// drop a compiled binary into the checkout that the host-side
+// `git add -A` commits into the PR. The fix step must run
+// artifact-free: the pushed branch contains exactly the seeded files
+// plus the patch, nothing else. (The image is left empty on purpose so
+// the run also exercises auto-detection: go.mod → golang, source auto.)
+func TestSolveLiveGoRepoLeavesNoBuildArtifacts(t *testing.T) {
+	gitAvailable(t)
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not installed; the fix step would run on the host through the stub")
+	}
+	installDockerStub(t)
+	bare := newGoE2ERemote(t)
+	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "bump the greeting"}}, nil)
+	ai := newGoE2EAIClient(t)
+	log := newSolveLog()
+
+	res, err := solve.Solve(context.Background(), solve.Deps{
+		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
+		AI:     ai,
+		Git:    solve.ExecGit,
+		Log:    log.logf,
+	}, solve.Options{
+		Owner: "towner", Repo: "trepo", IssueNumber: 9,
+	})
+	if err != nil {
+		t.Fatalf("Solve: %v", err)
+	}
+	if res.PR == nil {
+		t.Fatal("live run opened no pull request")
+	}
+	if !log.has("sandbox: golang:1.22 (source: auto)") {
+		t.Errorf("missing the auto-detected sandbox audit line (go.mod should pick the golang image)")
+	}
+	// The pushed branch must be exactly the seeded files plus the fix —
+	// no compiled binary left behind by the verification step.
+	files := runE2EGit(t, bare, "ls-tree", "-r", "--name-only", "shipyard/issue-9")
+	if files != "go.mod\nmain.go\n" {
+		t.Errorf("remote branch file set = %q, want exactly go.mod and main.go (no build artifacts)", files)
+	}
+	if show := runE2EGit(t, bare, "show", "shipyard/issue-9:main.go"); !strings.Contains(show, `shipyard v1`) {
+		t.Errorf("remote branch does not contain the fix:\n%s", show)
+	}
+}
+
+// goSeedMain is a single `package main` at the module root — the repo
+// shape where `go build ./...` writes a binary into the root.
+const goSeedMain = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"shipyard v0\")\n}\n"
+
+const goSeedPatch = "diff --git a/main.go b/main.go\n" +
+	"index 1234567..89abcde 100644\n" +
+	"--- a/main.go\n" +
+	"+++ b/main.go\n" +
+	"@@ -5,3 +5,3 @@\n" +
+	" func main() {\n" +
+	"-\tfmt.Println(\"shipyard v0\")\n" +
+	"+\tfmt.Println(\"shipyard v1\")\n" +
+	" }\n"
+
+const goSeedResponse = "Bumped the greeting to v1.\n```diff\n" + goSeedPatch + "```\n"
+
+// newGoE2ERemote is newE2ERemote's twin seeding a Go module instead of
+// the Python hello.py repo.
+func newGoE2ERemote(t *testing.T) (bare string) {
+	t.Helper()
+	dir := t.TempDir()
+	bare = filepath.Join(dir, "origin.git")
+	workdir := filepath.Join(dir, "seed")
+	runE2EGit(t, "", "init", "--bare", "-b", "main", bare)
+	mustE2E(t, os.MkdirAll(workdir, 0o755))
+	mustE2E(t, os.WriteFile(filepath.Join(workdir, "go.mod"), []byte("module m\n\ngo 1.22\n"), 0o644))
+	mustE2E(t, os.WriteFile(filepath.Join(workdir, "main.go"), []byte(goSeedMain), 0o644))
+	runE2EGit(t, workdir, "init", "-b", "main")
+	runE2EGit(t, workdir, "add", "-A")
+	runE2EGit(t, workdir, "-c", "user.name=seed", "-c", "user.email=seed@test", "commit", "--quiet", "-m", "seed")
+	runE2EGit(t, workdir, "remote", "add", "origin", bare)
+	runE2EGit(t, workdir, "push", "--quiet", "-u", "origin", "main")
+	return bare
+}
+
+// newGoE2EAIClient is a mock AI endpoint canned to answer with the Go
+// seed patch.
+func newGoE2EAIClient(t *testing.T) *aiclient.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(goSeedResponse)
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, body)
+	}))
+	t.Cleanup(srv.Close)
+	return aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
+}
 
 // TestSolveLiveFixStepInSandbox is the acceptance test for the wiring:
 // a live solve runs the fix step (patch apply, then the image's
