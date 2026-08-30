@@ -15,19 +15,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
 	"github.com/pefman/Shipyard/internal/guardrails"
+	"github.com/pefman/Shipyard/internal/piagent"
 	"github.com/pefman/Shipyard/internal/solve"
 )
 
 // Unit tests for the polling/loop logic of listen mode. The GitHub API
-// and the AI endpoint are in-process HTTP mocks; git is faked, so these
+// is an in-process HTTP mock; git and the agent are faked, so these
 // tests cover the loop itself (filters, skipping, state, shutdown)
-// without a git binary. The full flow with real git is covered in
-// listen_e2e_test.go.
-
-const cannedResponse = "Fixed the issue.\n```diff\n--- a/hello.py\n+++ b/hello.py\n@@ -1 +1 @@\n-old\n+new\n```\n"
+// without a git binary and without an agent binary. The full flow with
+// real git and the stub agent is covered in listen_e2e_test.go.
 
 type testIssue struct {
 	number int
@@ -139,27 +137,48 @@ func newFakeGitHub(t *testing.T, issues []testIssue) *fakeGitHub {
 	return f
 }
 
-func newFakeAI(t *testing.T) *aiclient.Client {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(cannedResponse)
-		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, body)
-	}))
-	t.Cleanup(srv.Close)
-	return aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
-}
-
 // fakeGit is a solve.GitRunner that pretends every git command
 // succeeds: no files are read or written, so tests exercise only the
-// listen loop.
+// listen loop. The cached diff reports the change the faked agent
+// "made", so the flow finds something to commit.
 type fakeGit struct{}
 
 func (fakeGit) Run(_ context.Context, _ string, args ...string) (string, error) {
 	if args[0] == "ls-files" {
 		return "hello.py\nREADME.md", nil
 	}
+	if args[0] == "diff" {
+		return "diff --git a/hello.py b/hello.py\n--- a/hello.py\n+++ b/hello.py\n@@ -1 +1 @@\n-old\n+new\n", nil
+	}
 	return "", nil
+}
+
+// fakeAgent is a piagent.Runner that always succeeds without touching
+// anything: the listen unit tests fake the agent exactly like they fake
+// git; the loop logic is the unit under test.
+type fakeAgent struct{}
+
+func (fakeAgent) RunAgent(ctx context.Context, spec piagent.RunSpec) (*piagent.RunOutcome, error) {
+	// Respect cancellation the way a real agent run does: the agent
+	// step is where a shutdown mid-solve lands.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &piagent.RunOutcome{
+		Container: spec.BaseImage != "",
+		Image:     spec.BaseImage,
+		Turns:     1,
+		Summary:   "fake agent: fixed it",
+	}, nil
+}
+
+// withAgentConfig returns o with the dummy agent config the flow's
+// validation requires; the faked agent never connects to it.
+func withAgentConfig(o Options) Options {
+	if o.AgentConfig.Endpoint == "" {
+		o.AgentConfig = piagent.Config{Provider: "custom", Endpoint: "http://127.0.0.1:1/v1", Model: "mock-model"}
+	}
+	return o
 }
 
 // cancelOnFirstGit is a fake git runner that cancels its context on the
@@ -184,9 +203,9 @@ func newTestDeps(t *testing.T, gh *fakeGitHub, git solve.GitRunner) Deps {
 	t.Helper()
 	return Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     newFakeAI(t),
+		Agent:  fakeAgent{},
 		Git:    git,
-		// Force the native fix-step path: these tests must not depend
+		// Force the native agent path: these tests must not depend
 		// on a Docker daemon being present or not.
 		DockerOK: func(context.Context) bool { return false },
 		Log:      func(format string, args ...any) {}, // keep test output quiet

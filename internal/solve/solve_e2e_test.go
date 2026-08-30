@@ -1,9 +1,10 @@
 package solve
 
-// End-to-end tests for the solving flow: real git (clone, apply, commit,
-// push) against a local bare "remote", with the GitHub API and the AI
-// endpoint served by in-process mocks. They exercise the same code the
-// CLI runs, minus the real GitHub/AI hosts.
+// End-to-end tests for the solving flow: real git (clone, agent run,
+// commit, push) against a local bare "remote", with the GitHub API
+// served by an in-process mock and the built-in pi agent stubbed on
+// PATH (internal/testpi). They exercise the same code the CLI runs,
+// minus the real GitHub host and the real agent.
 
 import (
 	"bytes"
@@ -20,9 +21,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/piagent"
+	"github.com/pefman/Shipyard/internal/testpi"
 )
 
 func gitAvailable(t *testing.T) {
@@ -34,17 +37,12 @@ func gitAvailable(t *testing.T) {
 
 const (
 	seedHello = "def greet(name):\n    return \"Hello, \" + name\n"
-	seedPatch = "diff --git a/hello.py b/hello.py\n" +
-		"index 1234567..89abcde 100644\n" +
-		"--- a/hello.py\n" +
-		"+++ b/hello.py\n" +
-		"@@ -1,2 +1,4 @@\n" +
-		" def greet(name):\n" +
-		"+    if not name:\n" +
-		"+        return \"Hello, stranger\"\n" +
-		"     return \"Hello, \" + name\n"
-	seedResponse = "greet() crashes on empty input; it now returns a fallback greeting.\n" +
-		"```diff\n" + seedPatch + "```\n"
+
+	seedHelloFixed = `def greet(name):
+    if not name:
+        return "Hello, stranger"
+    return "Hello, " + name
+`
 )
 
 type fakeGitHub struct {
@@ -97,50 +95,38 @@ func newFakeGitHub(t *testing.T, cloneURL string) *fakeGitHub {
 	return f
 }
 
-func newFakeAI(t *testing.T, response string) *aiclient.Client {
+// installAgent installs the stub pi binary on PATH. The stub acts on
+// the task file shipyard wrote into the checkout: it "fixes" the repo
+// when the task carries the seed issue, and makes no changes
+// otherwise (PI_STUB_MODE=noop). The test asserts afterwards that the
+// task file really carried the issue.
+func installAgent(t *testing.T, mode, fixFile, fixContent string) {
 	t.Helper()
-	mux := http.NewServeMux()
-	var (
-		mu         sync.Mutex
-		lastPrompt string
-		aiCalled   bool
-	)
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var req struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
+	testpi.Install(t)
+	if mode != "" {
+		t.Setenv("PI_STUB_MODE", mode)
+	}
+	if fixFile != "" {
+		t.Setenv("PI_STUB_FIX_FILE", fixFile)
+	}
+	if fixContent != "" {
+		t.Setenv("PI_STUB_FIX_CONTENT", fixContent)
+	}
+}
+
+// assertTaskWritten checks that the agent run wrote the task file with
+// the issue in it (the stub agent worked from that file).
+func assertTaskWritten(t *testing.T, workdir string, wants ...string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(workdir, piagent.DirName, piagent.TaskFile))
+	if err != nil {
+		t.Fatalf("the agent's task file was not written: %v", err)
+	}
+	for _, want := range wants {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("task file missing %q:\n%s", want, data)
 		}
-		_ = json.Unmarshal(body, &req)
-		mu.Lock()
-		if len(req.Messages) > 0 {
-			lastPrompt = req.Messages[0].Content
-			aiCalled = true
-		}
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, jsonString(response))
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	c := aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
-	t.Cleanup(func() {
-		mu.Lock()
-		called, prompt := aiCalled, lastPrompt
-		mu.Unlock()
-		if !called {
-			return // the flow failed before reaching the AI endpoint
-		}
-		for _, want := range []string{"Issue #9: greet() crashes on empty input", "bug", "greet('') should return", "unified diff"} {
-			if !strings.Contains(prompt, want) {
-				t.Errorf("prompt sent to AI missing %q:\n%s", want, prompt)
-			}
-		}
-	})
-	return c
+	}
 }
 
 // newFakeRemote creates a bare repo plus a working seed checkout pushed
@@ -183,31 +169,41 @@ func must(t *testing.T, err error) {
 	}
 }
 
-func newDeps(gh *fakeGitHub, ai *aiclient.Client, t *testing.T) Deps {
+func agentConfig() piagent.Config {
+	return piagent.Config{
+		Provider: "custom",
+		Endpoint: "http://127.0.0.1:8765/v1",
+		Model:    "mock-model",
+	}
+}
+
+// newDeps builds the solve dependencies for the end-to-end tests: the
+// stub agent as engine and the native run path (no Docker), so the
+// tests never need a Docker daemon or a live model.
+func newDeps(gh *fakeGitHub, t *testing.T) Deps {
 	return Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
-		// Force the native fix-step path: these end-to-end tests must
-		// not depend on a Docker daemon being present or not (the
-		// sandbox wiring is covered in internal/listen with a stub
-		// docker binary).
+		Agent:  piagent.DefaultRunner,
+		// Native agent path: the stub pi binary on PATH does the work.
 		DockerOK: func(context.Context) bool { return false },
 		Log:      func(format string, args ...any) {}, // keep test output quiet
 	}
 }
 
 // TestSolveE2E is the acceptance test for the core loop: one issue in
-// one repo produces one reviewable pull request.
+// one repo produces one reviewable pull request, with the changes made
+// by the agent on the checkout.
 func TestSolveE2E(t *testing.T) {
 	gitAvailable(t)
+	installAgent(t, "fix", "hello.py", seedHelloFixed)
 	bare, workdir := newFakeRemote(t)
 	gh := newFakeGitHub(t, bare)
-	ai := newFakeAI(t, seedResponse)
-	d := newDeps(gh, ai, t)
+	d := newDeps(gh, t)
 
 	res, err := Solve(context.Background(), d, Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
-		Workdir: workdir, // build on the seeded checkout
+		Workdir:     workdir, // build on the seeded checkout
+		AgentConfig: agentConfig(),
 	})
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
@@ -218,13 +214,17 @@ func TestSolveE2E(t *testing.T) {
 	if res.PR == nil || res.PR.Number != 42 {
 		t.Fatalf("expected an opened PR, got %+v", res.PR)
 	}
+	assertTaskWritten(t, workdir,
+		"issue #9", "greet() crashes on empty input", "bug",
+		"greet('') should return a fallback greeting", "Do not commit",
+	)
 
 	// The branch landed on the remote.
 	refs := run(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9")
 	if !strings.Contains(refs, "refs/heads/shipyard/issue-9") {
 		t.Errorf("branch not pushed to remote: %q", refs)
 	}
-	// ... with the fixed code.
+	// ... with the agent's fix.
 	show := run(t, bare, "show", "shipyard/issue-9:hello.py")
 	if !strings.Contains(show, "Hello, stranger") {
 		t.Errorf("remote branch does not contain the fix:\n%s", show)
@@ -245,7 +245,15 @@ func TestSolveE2E(t *testing.T) {
 	if !strings.Contains(pr.Title, "#9") || !strings.Contains(pr.Title, "greet()") {
 		t.Errorf("PR title = %q", pr.Title)
 	}
-	// The workdir holds the applied fix.
+	if !strings.Contains(pr.Body, "built-in pi agent") {
+		t.Errorf("PR body should credit the built-in agent: %q", pr.Body)
+	}
+	// The workdir holds the agent's fix, and its agent config directory
+	// did not leak into the branch.
+	files := run(t, bare, "ls-tree", "-r", "--name-only", "shipyard/issue-9")
+	if strings.Contains(files, piagent.DirName) {
+		t.Errorf("the agent's config directory leaked into the branch:\n%s", files)
+	}
 	data, err := os.ReadFile(filepath.Join(workdir, "hello.py"))
 	must(t, err)
 	if !strings.Contains(string(data), "Hello, stranger") {
@@ -254,17 +262,18 @@ func TestSolveE2E(t *testing.T) {
 }
 
 // TestSolveE2EClone covers the flow when no local checkout is given:
-// Shipyard must clone, solve, and deliver.
+// Shipyard must clone, run the agent, and deliver.
 func TestSolveE2EClone(t *testing.T) {
 	gitAvailable(t)
+	installAgent(t, "fix", "hello.py", seedHelloFixed)
 	bare, _ := newFakeRemote(t)
 	gh := newFakeGitHub(t, bare) // clone_url points at the bare repo
-	ai := newFakeAI(t, seedResponse)
-	d := newDeps(gh, ai, t)
+	d := newDeps(gh, t)
 	d.TempDir = t.TempDir()
 
 	res, err := Solve(context.Background(), d, Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
+		AgentConfig: agentConfig(),
 	})
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
@@ -279,62 +288,88 @@ func TestSolveE2EClone(t *testing.T) {
 
 func TestSolveBranchCollision(t *testing.T) {
 	gitAvailable(t)
+	installAgent(t, "fix", "hello.py", seedHelloFixed)
 	bare, workdir := newFakeRemote(t)
 	gh := newFakeGitHub(t, bare)
-	ai := newFakeAI(t, seedResponse)
-	opts := Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir}
+	d := newDeps(gh, t)
+	opts := Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir, AgentConfig: agentConfig()}
 
 	// First run delivers the branch; the second run with the same name
 	// must fail with a clear error instead of a confusing push rejection.
-	if _, err := Solve(context.Background(), newDeps(gh, ai, t), opts); err != nil {
+	if _, err := Solve(context.Background(), d, opts); err != nil {
 		t.Fatalf("first Solve: %v", err)
 	}
-	_, err := Solve(context.Background(), newDeps(gh, ai, t), opts)
+	_, err := Solve(context.Background(), d, opts)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("second Solve: want already-exists error, got %v", err)
 	}
 }
 
+// TestSolveE2ENoUsableChanges: an agent run that leaves the repository
+// unchanged must fail with ErrNoUsableChanges (nothing to review).
 func TestSolveE2ENoUsableChanges(t *testing.T) {
 	gitAvailable(t)
+	installAgent(t, "noop", "", "")
 	_, workdir := newFakeRemote(t)
 	gh := newFakeGitHub(t, "")
-	ai := newFakeAI(t, "I could not find a change that fixes this issue.")
-	d := newDeps(gh, ai, t)
+	d := newDeps(gh, t)
 
-	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir})
+	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir, AgentConfig: agentConfig()})
 	if !errors.Is(err, ErrNoUsableChanges) {
 		t.Fatalf("want ErrNoUsableChanges, got %v", err)
 	}
 }
 
-func TestSolveE2EPatchDoesNotApply(t *testing.T) {
+// TestSolveE2EAgentFails: a failing agent run (non-zero exit) must fail
+// the solve before any commit, push, or PR.
+func TestSolveE2EAgentFails(t *testing.T) {
 	gitAvailable(t)
-	_, workdir := newFakeRemote(t)
-	badPatch := "diff --git a/no_such_file.py b/no_such_file.py\n--- a/no_such_file.py\n+++ b/no_such_file.py\n@@ -1 +1 @@\n-a\n+b\n"
-	ai := newFakeAI(t, "Fix:\n```diff\n"+badPatch+"```\n")
+	installAgent(t, "fail", "", "")
+	bare, workdir := newFakeRemote(t)
 	gh := newFakeGitHub(t, "")
-	d := newDeps(gh, ai, t)
+	d := newDeps(gh, t)
 
-	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir})
-	if err == nil || !strings.Contains(err.Error(), "does not apply") {
-		t.Fatalf("want 'does not apply' error, got %v", err)
+	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir, AgentConfig: agentConfig()})
+	if err == nil || !strings.Contains(err.Error(), "exited 3") {
+		t.Fatalf("want the agent failure, got %v", err)
 	}
-	if !strings.Contains(err.Error(), ".patch") {
-		t.Errorf("error should point at the saved patch file: %v", err)
+	if refs := run(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9"); strings.TrimSpace(refs) != "" {
+		t.Errorf("branch pushed although the agent failed: %q", refs)
+	}
+}
+
+// TestSolveE2ETurnBudget: an agent that keeps going past the turn
+// budget is stopped, and the run fails without commit, push, or PR.
+func TestSolveE2ETurnBudget(t *testing.T) {
+	gitAvailable(t)
+	installAgent(t, "noop", "", "")
+	t.Setenv("PI_STUB_TURNS", "5")
+	t.Setenv("PI_STUB_SLEEP", "0.2")
+	bare, _ := newFakeRemote(t)
+	gh := newFakeGitHub(t, bare)
+	d := newDeps(gh, t)
+	d.TempDir = t.TempDir()
+
+	_, err := Solve(context.Background(), d, Options{
+		Owner: "towner", Repo: "trepo", IssueNumber: 9,
+		AgentConfig:   agentConfig(),
+		AgentMaxTurns: 2, AgentTimeout: 30 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "turn budget") {
+		t.Fatalf("want the turn budget error, got %v", err)
 	}
 }
 
 func TestSolveE2EMissingPRPermissions(t *testing.T) {
 	gitAvailable(t)
+	installAgent(t, "fix", "hello.py", seedHelloFixed)
 	_, workdir := newFakeRemote(t)
 	gh := newFakeGitHub(t, "")
 	gh.prStatus = http.StatusForbidden
 	gh.prBody = `{"message": "Resource not accessible by integration"}`
-	ai := newFakeAI(t, seedResponse)
-	d := newDeps(gh, ai, t)
+	d := newDeps(gh, t)
 
-	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir})
+	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir, AgentConfig: agentConfig()})
 	if err == nil || !strings.Contains(err.Error(), "opening pull request") {
 		t.Fatalf("want PR-opening error, got %v", err)
 	}
@@ -345,15 +380,41 @@ func TestSolveE2EMissingPRPermissions(t *testing.T) {
 
 func TestSolveDirtyWorkdirRejected(t *testing.T) {
 	gitAvailable(t)
+	installAgent(t, "fix", "hello.py", seedHelloFixed)
 	_, workdir := newFakeRemote(t)
 	must(t, os.WriteFile(filepath.Join(workdir, "dirty.txt"), []byte("x"), 0o644))
 	gh := newFakeGitHub(t, "")
-	ai := newFakeAI(t, seedResponse)
-	d := newDeps(gh, ai, t)
+	d := newDeps(gh, t)
 
-	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir})
+	_, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir, AgentConfig: agentConfig()})
 	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
 		t.Fatalf("want uncommitted-changes error, got %v", err)
+	}
+}
+
+// TestSolveDryRunLeavesWorkdir: a dry run runs the agent but commits,
+// pushes, and opens nothing; the workdir keeps the agent's changes.
+func TestSolveDryRunLeavesWorkdir(t *testing.T) {
+	gitAvailable(t)
+	installAgent(t, "fix", "hello.py", seedHelloFixed)
+	bare, workdir := newFakeRemote(t)
+	gh := newFakeGitHub(t, bare)
+	d := newDeps(gh, t)
+
+	res, err := Solve(context.Background(), d, Options{Owner: "towner", Repo: "trepo", IssueNumber: 9, Workdir: workdir, AgentConfig: agentConfig(), DryRun: true})
+	if err != nil {
+		t.Fatalf("Solve: %v", err)
+	}
+	if res.PR != nil {
+		t.Error("dry run opened a pull request")
+	}
+	if refs := run(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9"); strings.TrimSpace(refs) != "" {
+		t.Errorf("dry run pushed a branch: %q", refs)
+	}
+	data, err := os.ReadFile(filepath.Join(workdir, "hello.py"))
+	must(t, err)
+	if !strings.Contains(string(data), "Hello, stranger") {
+		t.Errorf("dry run workdir does not hold the agent's changes:\n%s", data)
 	}
 }
 

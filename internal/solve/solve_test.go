@@ -46,14 +46,3 @@ func TestExecGitRunRedactsFailureOutput(t *testing.T) {
 		t.Errorf("credentials leaked into the error: %v", err)
 	}
 }
-
-func TestExplainKeepsCodeSamples(t *testing.T) {
-	resp := "Note this pattern:\n```go\nfunc f() {}\n```\n```diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n```\n"
-	_, explanation, err := ExtractPatch(resp)
-	if err != nil {
-		t.Fatalf("ExtractPatch: %v", err)
-	}
-	if !strings.Contains(explanation, "func f() {}") {
-		t.Errorf("a legitimate code sample from the explanation was stripped:\n%s", explanation)
-	}
-}

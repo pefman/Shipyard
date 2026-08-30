@@ -10,12 +10,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
 	"github.com/pefman/Shipyard/internal/guardrails"
+	"github.com/pefman/Shipyard/internal/piagent"
 	"github.com/pefman/Shipyard/internal/repo"
 	"github.com/pefman/Shipyard/internal/solve"
 )
@@ -83,20 +85,23 @@ Solve flags:
                          default custom: --ai-endpoint required, key optional)
   --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
   --ai-key <k>           AI API key (env SHIPYARD_AI_KEY; also SHIPYARD_OPENAI_KEY / SHIPYARD_XAI_KEY)
-  --ai-model <m>         Model name sent to the endpoint (env SHIPYARD_AI_MODEL;
-                         defaults: openai gpt-5.6-sol, xai grok-4.6)
+  --ai-model <m>         Model the built-in agent uses, served by the endpoint
+                         (env SHIPYARD_AI_MODEL; defaults: openai gpt-5.6-sol,
+                         xai grok-4.6)
+  --agent-max-turns <n>  Cap the agent's assistant turns for the issue
+                         (env SHIPYARD_AGENT_MAX_TURNS; default 30)
+  --agent-timeout <dur>  Cap the agent run's wall clock per issue
+                         (env SHIPYARD_AGENT_TIMEOUT; default 30m)
   --workdir <dir>        Local checkout to build on (default: clone to a temp dir)
   --base <branch>        Base branch (default: the repo's default branch)
   --branch <name>        Branch for the fix (default: shipyard/issue-<n>)
-  --include-files <list> Comma-separated files to embed in the prompt
   --git-url <url>        Git clone URL (with --workdir unset; default from the API)
-  --image <image>        Sandbox image for the fix step (live runs only; default:
-                         auto-detected from the repository — see the README)
-  --dry-run              Stop after applying the patch: no commit, push, or PR
-  --verbose              Log the full AI conversation: the prompt sent, the
-                         response, the thinking/reasoning block when the
-                         endpoint returns one, and HTTP status, latency, and
-                         finish_reason (env SHIPYARD_VERBOSE=1). Off by default
+  --image <image>        Language image the sandbox container is built on (default:
+                         auto-detected from the repository — see the README);
+                         the built-in pi agent runtime is added by the wrapper image
+  --dry-run              Stop after the agent's work: no commit, push, or PR
+  --verbose              Log the agent's raw event lines in addition to the
+                         rendered progress (env SHIPYARD_VERBOSE=1). Off by default
 
 Guardrails (solve and listen):
   --repos <list>         Comma-separated repository allowlist, owner/repo entries
@@ -133,20 +138,24 @@ Listen flags:
                          default custom: --ai-endpoint required, key optional)
   --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
   --ai-key <k>           AI API key (env SHIPYARD_AI_KEY; also SHIPYARD_OPENAI_KEY / SHIPYARD_XAI_KEY)
-  --ai-model <m>         Model name sent to the endpoint (env SHIPYARD_AI_MODEL;
-                         defaults: openai gpt-5.6-sol, xai grok-4.6)
+  --ai-model <m>         Model the built-in agent uses, served by the endpoint
+                         (env SHIPYARD_AI_MODEL; defaults: openai gpt-5.6-sol,
+                         xai grok-4.6)
   --base <branch>        Base branch (default: the repo's default branch)
   --git-url <url>        Git clone URL for the per-issue checkout
-  --include-files <list> Comma-separated files to embed in the prompt
-  --image <image>        Sandbox image for the fix step (live runs only; default:
-                         auto-detected from the repository)
-  --dry-run              Dry-run mode (the default for listen): apply patches
-                         but commit nothing and open no pull requests. Takes
-                         precedence over SHIPYARD_MODE; conflicts with --live
-  --verbose              Log the full AI conversation per issue (prompt sent,
-                         response, thinking/reasoning, HTTP status, latency,
-                         finish_reason), prefixed like all output (env
-                         SHIPYARD_VERBOSE=1). Off by default
+  --image <image>        Language image the sandbox container is built on
+                         (default: auto-detected from the repository)
+  --agent-max-turns <n>  Cap the agent's assistant turns per issue
+                         (env SHIPYARD_AGENT_MAX_TURNS; default 30)
+  --agent-timeout <dur>  Cap the agent run's wall clock per issue
+                         (env SHIPYARD_AGENT_TIMEOUT; default 30m)
+  --dry-run              Dry-run mode (the default for listen): the agent's work
+                         is kept but nothing is committed and no pull requests
+                         are opened. Takes precedence over SHIPYARD_MODE;
+                         conflicts with --live
+  --verbose              Log the agent's raw event lines per issue in addition
+                         to the rendered progress, prefixed like all output
+                         (env SHIPYARD_VERBOSE=1). Off by default
 
 Login flags:
   --github-client-id <id> GitHub OAuth App client ID (env SHIPYARD_GITHUB_CLIENT_ID;
@@ -182,11 +191,12 @@ func runSolve(args []string) error {
 	workdir := fs.String("workdir", "", "local checkout to build on (default: clone)")
 	base := fs.String("base", "", "base branch (default: repo default branch)")
 	branch := fs.String("branch", "", "branch for the fix (default: shipyard/issue-<n>)")
-	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
+	agentMaxTurns := fs.Int("agent-max-turns", -1, "cap the agent's assistant turns for the issue (env SHIPYARD_AGENT_MAX_TURNS; default 30)")
+	agentTimeout := fs.Duration("agent-timeout", 0, "cap the agent run's wall clock (env SHIPYARD_AGENT_TIMEOUT; default 30m)")
 	gitURL := fs.String("git-url", "", "git clone URL (with --workdir unset)")
-	dryRun := fs.Bool("dry-run", false, "stop after applying the patch: no commit, push, or PR")
-	verbose := fs.Bool("verbose", verboseFromEnv(), "log the full AI conversation: prompt, response, thinking, diagnostics (env SHIPYARD_VERBOSE=1)")
-	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
+	dryRun := fs.Bool("dry-run", false, "stop after the agent's work: no commit, push, or PR")
+	verbose := fs.Bool("verbose", verboseFromEnv(), "log the agent's raw event lines in addition to the rendered progress (env SHIPYARD_VERBOSE=1)")
+	image := fs.String("image", "", "language image the sandbox container is built on (default: auto-detect)")
 	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
 	labels := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS)")
 	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
@@ -232,14 +242,24 @@ func runSolve(args []string) error {
 		return err
 	}
 
-	var files []string
-	for _, f := range strings.Split(*includeFiles, ",") {
-		if f = strings.TrimSpace(f); f != "" {
-			files = append(files, f)
-		}
+	maxTurns, err := resolveMaxTurns(*agentMaxTurns, os.Getenv(envAgentMaxTurns))
+	if err != nil {
+		return err
+	}
+	timeout, err := resolveAgentTimeout(*agentTimeout, os.Getenv(envAgentTimeout))
+	if err != nil {
+		return err
 	}
 
-	ai := aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey, cfg.AIModel)
+	agentConfig := piagent.Config{
+		Provider: cfg.AIProvider,
+		Endpoint: cfg.AIEndpoint,
+		APIKey:   cfg.AIKey,
+		Model:    cfg.AIModel,
+	}
+	if err := agentConfig.Validate(); err != nil {
+		return err
+	}
 	gh := githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken)
 	// With a label allowlist, the target issue must carry one of the
 	// allowed labels; check it before spending an AI call on it.
@@ -255,27 +275,27 @@ func runSolve(args []string) error {
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub: gh,
-		AI:     ai,
 	}, solve.Options{
-		Owner:        owner,
-		Repo:         name,
-		IssueNumber:  *issue,
-		Workdir:      *workdir,
-		GitURL:       *gitURL,
-		Base:         *base,
-		Branch:       *branch,
-		IncludeFiles: files,
-		Image:        *image,
-		DryRun:       *dryRun,
-		Verbose:      *verbose,
+		Owner:         owner,
+		Repo:          name,
+		IssueNumber:   *issue,
+		Workdir:       *workdir,
+		GitURL:        *gitURL,
+		Base:          *base,
+		Branch:        *branch,
+		Image:         *image,
+		AgentConfig:   agentConfig,
+		AgentMaxTurns: maxTurns,
+		AgentTimeout:  timeout,
+		DryRun:        *dryRun,
+		Verbose:       *verbose,
 	})
 	if err != nil {
 		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "done: branch %s on %s\n", res.Branch, res.Workdir)
-	fmt.Fprintln(os.Stderr, "patch: "+res.PatchPath)
-	fmt.Fprintln(os.Stderr, "AI response: "+res.ResponsePath)
+	fmt.Fprintln(os.Stderr, "changes: "+res.PatchPath)
 	if res.PR != nil {
 		fmt.Printf("\nPull request opened: %s (#%d)\n", res.PR.HTMLURL, res.PR.Number)
 	}
@@ -306,11 +326,46 @@ type guardrailInput struct {
 }
 
 const (
-	envRepos  = "SHIPYARD_REPOS"
-	envLabels = "SHIPYARD_LABELS"
-	envMaxPRs = "SHIPYARD_MAX_PRS"
-	envVerbose = "SHIPYARD_VERBOSE"
+	envRepos     = "SHIPYARD_REPOS"
+	envLabels    = "SHIPYARD_LABELS"
+	envMaxPRs    = "SHIPYARD_MAX_PRS"
+	envVerbose   = "SHIPYARD_VERBOSE"
+	envAgentMaxTurns = "SHIPYARD_AGENT_MAX_TURNS"
+	envAgentTimeout  = "SHIPYARD_AGENT_TIMEOUT"
 )
+
+// resolveMaxTurns resolves the agent turn budget: the flag wins over the
+// environment; both unset selects piagent.DefaultMaxTurns (returned as
+// 0 for the solve flow to apply).
+func resolveMaxTurns(flag int, env string) (int, error) {
+	if flag > 0 {
+		return flag, nil
+	}
+	if env == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(env)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid %s value %q (want a positive number)", envAgentMaxTurns, env)
+	}
+	return n, nil
+}
+
+// resolveAgentTimeout resolves the agent wall-clock budget the same way
+// (flag over environment; both unset selects piagent.DefaultTimeout).
+func resolveAgentTimeout(flag time.Duration, env string) (time.Duration, error) {
+	if flag > 0 {
+		return flag, nil
+	}
+	if env == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(env)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid %s value %q (want a duration like 45m)", envAgentTimeout, env)
+	}
+	return d, nil
+}
 
 // verboseFromEnv reports whether SHIPYARD_VERBOSE asks for the full AI
 // conversation to be logged (1/true/yes/on; anything else is off). It

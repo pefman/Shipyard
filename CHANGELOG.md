@@ -4,6 +4,67 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Changed (SHI-47)
+
+- **The solving engine is now the built-in pi coding agent** — no more
+  one-shot "prompt → diff" completion. Shipyard writes the issue (title,
+  labels, body, branch, environment) and the model configuration into
+  the checkout's agent directory (`.shipyard-pi/`, git-excluded) and
+  runs pi against the configured OpenAI-compatible endpoint. The agent
+  reads and edits files itself, runs the repository's build and test
+  commands, and iterates until they pass; Shipyard then commits the
+  agent's work, pushes, and opens the pull request. The pi runtime is
+  **built into Shipyard** (vendored offline in the repo) and runs in
+  the sandbox container via a wrapper image over the language image
+  (`shipyard-sandbox/<base>:pi-<version>`, auto-built on first use);
+  without Docker the agent runs natively, which needs the `pi` binary
+  on the host.
+- Progress streams into shipyard's log per issue (`issue #42: agent: …`):
+  turns, tool calls, the model's text, endpoint trouble (with pi's
+  automatic retries), and compaction events. `--verbose` now adds the
+  agent's raw event lines (replacing the one-shot conversation dump).
+- **Agent budgets**: `--agent-max-turns` (env `SHIPYARD_AGENT_MAX_TURNS`,
+  default 30) caps the agent's assistant turns per issue and
+  `--agent-timeout` (env `SHIPYARD_AGENT_TIMEOUT`, default 30m) caps
+  its wall clock; hitting either stops the run before any commit, push,
+  or PR.
+- **Dry runs now run the agent in the sandbox whenever Docker is
+  available** (dry runs included: the agent executes code, so the
+  container is the safe choice). A dry run still commits, pushes, and
+  opens nothing.
+- Failure modes changed with the engine: `the agent returned no usable
+  changes` (agent left the tree untouched) and `agent stopped: budget
+  exhausted` replace the patch-extraction failures; a failing
+  verification step reports `verify step N of M … exited C`.
+- `hack/mockai` now streams (SSE) like a real model, shaped for the
+  agent's streaming client; its canned response is agent instructions,
+  not a diff.
+- Docs: README rewritten around the built-in agent (sandbox section now
+  covers the wrapper image and native runs; the failure-mode table and
+  the end-to-end test-run recipe are updated).
+
+### Removed (SHI-47)
+
+- `--include-files`: the agent reads the repository itself; there is no
+  file tree to attach to a prompt.
+- The one-shot AI call and its client (`internal/aiclient`): the
+  OpenAI-compatible endpoint is now consumed by the built-in agent,
+  not by a bespoke completions client.
+
+### Added (SHI-47)
+
+- `internal/piagent`: the built-in agent runner — task/config
+  preparation, the pi invocation, JSON event parsing and rendering,
+  turn/wall-clock budgets, and the container path (wrapper image over
+  the language image, artifact-free post-verification steps). The
+  vendored offline pi bundle (package, lockfile, npm cache, launcher,
+  Dockerfile) ships with the module.
+- `internal/testpi`: test doubles for the agent flow — a stub `pi`
+  binary that emits pi's JSON event stream (modes: fix/noop/fail, turn
+  and sleep knobs) and the stub `docker` binary the sandbox e2e tests
+  already used. `go test ./...` still needs no Docker daemon, no
+  container runtime, and no live model.
+
 ### Added (SHI-46)
 
 - `--verbose` (on both `solve` and `listen`, env `SHIPYARD_VERBOSE=1`):

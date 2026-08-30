@@ -1,139 +1,95 @@
 package listen
 
-// End-to-end tests for the sandbox wiring (SHI-33): a live solve run
-// executes the fix step (apply the AI's patch, then build and test) in
-// an ephemeral container. A stub docker binary on PATH stands in for
-// the daemon: it answers `info` and executes the container's /bin/sh
-// script in the directory the mount points at, so the "container"
-// behaves like the mounted workdir and the tests need no daemon.
+// Sandbox end-to-end tests for the solving flow: real git, a stub
+// docker binary (the "container" runs its script in the mounted
+// directory on the host) and the stub pi agent on PATH. They cover
+// the container path the live run takes: the built-in agent runs in
+// a wrapper image over the language image, and its changes plus the
+// artifact-free verification steps go through the container before the
+// commit, push, and pull request proceed natively.
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/piagent"
 	"github.com/pefman/Shipyard/internal/solve"
+	"github.com/pefman/Shipyard/internal/testpi"
 )
 
-const stubDocker = `#!/bin/sh
-if [ -n "${STUB_DOCKER_LOG:-}" ]; then
-  printf 'docker %s\n' "$*" >> "$STUB_DOCKER_LOG"
-fi
-case "$1" in
-  info)
-    exit 0
-    ;;
-  run)
-    shift
-    v=""
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --name|--entrypoint) shift 2 ;;
-        -v) v="$2"; shift 2 ;;
-        -w|-e) shift 2 ;;
-        --rm) shift ;;
-        -*) shift ;;
-        *) break ;;
-      esac
-    done
-    shift
-    [ "$1" = "-c" ] && shift
-    script="$1"
-    cd "${v%%:*}" || exit 127
-    exec /bin/sh -c "$script"
-    ;;
-  rm)
-    exit 0
-    ;;
-  *)
-    exit 125
-    ;;
-esac
-`
-
-// installDockerStub puts the stub docker binary first on PATH and logs
-// every invocation to a file the test can assert on.
+// installDockerStub puts the stub docker binary on PATH (next to the
+// stub pi) and returns the stub's log file path.
 func installDockerStub(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stubDocker), 0o755); err != nil {
-		t.Fatalf("writing stub docker: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	stubLog := filepath.Join(dir, "docker-stub.log")
-	t.Setenv("STUB_DOCKER_LOG", stubLog)
-	return stubLog
+	return testpi.InstallDocker(t)
 }
 
 func readStubLog(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "" // docker was never invoked
+		return ""
 	}
 	return string(data)
 }
 
-type solveLogBuf struct {
-	mu    sync.Mutex
+// newSolveLog collects the solve run's log lines for assertions.
+type newSolveLogType struct {
 	lines []string
 }
 
-func (b *solveLogBuf) logf(format string, args ...any) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.lines = append(b.lines, fmt.Sprintf(format, args...))
+func newSolveLog() *newSolveLogType { return &newSolveLogType{} }
+
+func (l *newSolveLogType) logf(format string, args ...any) {
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
 }
 
-func (b *solveLogBuf) has(s string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, l := range b.lines {
-		if strings.Contains(l, s) {
+func (l *newSolveLogType) has(s string) bool {
+	for _, line := range l.lines {
+		if strings.Contains(line, s) {
 			return true
 		}
 	}
 	return false
 }
 
-func newSolveLog() *solveLogBuf { return &solveLogBuf{} }
+func (l *newSolveLogType) String() string { return strings.Join(l.lines, "\n") }
 
-// TestSolveLiveGoRepoLeavesNoBuildArtifacts is the regression test for
-// the B1 review finding: the seed repo is a single `package main` at
-// the module root, so a plain `go build ./...` verification step would
-// drop a compiled binary into the checkout that the host-side
-// `git add -A` commits into the PR. The fix step must run
-// artifact-free: the pushed branch contains exactly the seeded files
-// plus the patch, nothing else. (The image is left empty on purpose so
-// the run also exercises auto-detection: go.mod → golang, source auto.)
-func TestSolveLiveGoRepoLeavesNoBuildArtifacts(t *testing.T) {
+// TestSolveLiveGoRepoRunsAgentInSandbox is the acceptance test for the
+// container path: a live solve on a Go repo auto-detects the golang
+// image, builds the built-in wrapper on top of it, runs the agent (the
+// stub) inside, and re-verifies the final tree with the artifact-free
+// steps: the pushed branch contains exactly the seeded files plus the
+// fix, and no compiled binary. (The image is left empty on purpose so
+// the run also exercises auto-detection: go.mod → golang, source
+// auto.)
+func TestSolveLiveGoRepoRunsAgentInSandbox(t *testing.T) {
 	gitAvailable(t)
 	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go toolchain not installed; the fix step would run on the host through the stub")
+		t.Skip("go toolchain not installed; the verification steps would run on the host through the stub")
 	}
-	installDockerStub(t)
+	testpi.Install(t)
+	stubLogPath := installDockerStub(t)
+	t.Setenv("PI_STUB_FIX_FILE", "main.go")
+	t.Setenv("PI_STUB_FIX_CONTENT", goSeedMainFixed)
 	bare := newGoE2ERemote(t)
 	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "bump the greeting"}}, nil)
-	ai := newGoE2EAIClient(t)
 	log := newSolveLog()
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
+		Agent:  piagent.DefaultRunner,
 		Git:    solve.ExecGit,
 		Log:    log.logf,
 	}, solve.Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
+		AgentConfig: agentConfigForTests(),
 	})
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
@@ -141,11 +97,18 @@ func TestSolveLiveGoRepoLeavesNoBuildArtifacts(t *testing.T) {
 	if res.PR == nil {
 		t.Fatal("live run opened no pull request")
 	}
+	if res.Sandbox != piagent.WrapperImageName(sandboxGolangImage) {
+		t.Errorf("Result.Sandbox = %q, want the built-in wrapper %q", res.Sandbox, piagent.WrapperImageName(sandboxGolangImage))
+	}
 	if !log.has("sandbox: golang:1.22 (source: auto)") {
 		t.Errorf("missing the auto-detected sandbox audit line (go.mod should pick the golang image)")
 	}
-	// The pushed branch must be exactly the seeded files plus the fix —
-	// no compiled binary left behind by the verification step.
+	if !log.has("agent: running the built-in pi agent in") {
+		t.Errorf("missing the in-sandbox agent line:\n%s", log)
+	}
+	// The pushed branch must be exactly the seeded files plus the
+	// fix — no compiled binary left behind by the agent or the
+	// verification steps.
 	files := runE2EGit(t, bare, "ls-tree", "-r", "--name-only", "shipyard/issue-9")
 	if files != "go.mod\nmain.go\n" {
 		t.Errorf("remote branch file set = %q, want exactly go.mod and main.go (no build artifacts)", files)
@@ -153,23 +116,28 @@ func TestSolveLiveGoRepoLeavesNoBuildArtifacts(t *testing.T) {
 	if show := runE2EGit(t, bare, "show", "shipyard/issue-9:main.go"); !strings.Contains(show, `shipyard v1`) {
 		t.Errorf("remote branch does not contain the fix:\n%s", show)
 	}
+	// ... and the container really ran (info, run, rm).
+	if stubLog := readStubLog(t, stubLogPath); !strings.Contains(stubLog, "docker run") {
+		t.Errorf("the agent run never went through the container:\n%s", stubLog)
+	}
+}
+
+// sandboxGolangImage pins the image the tests assert on.
+const sandboxGolangImage = "golang:1.22"
+
+func agentConfigForTests() piagent.Config {
+	return piagent.Config{
+		Provider: "custom",
+		Endpoint: "http://127.0.0.1:8765/v1",
+		Model:    "mock-model",
+	}
 }
 
 // goSeedMain is a single `package main` at the module root — the repo
 // shape where `go build ./...` writes a binary into the root.
 const goSeedMain = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"shipyard v0\")\n}\n"
 
-const goSeedPatch = "diff --git a/main.go b/main.go\n" +
-	"index 1234567..89abcde 100644\n" +
-	"--- a/main.go\n" +
-	"+++ b/main.go\n" +
-	"@@ -5,3 +5,3 @@\n" +
-	" func main() {\n" +
-	"-\tfmt.Println(\"shipyard v0\")\n" +
-	"+\tfmt.Println(\"shipyard v1\")\n" +
-	" }\n"
-
-const goSeedResponse = "Bumped the greeting to v1.\n```diff\n" + goSeedPatch + "```\n"
+const goSeedMainFixed = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"shipyard v1\")\n}\n"
 
 // newGoE2ERemote is newE2ERemote's twin seeding a Go module instead of
 // the Python hello.py repo.
@@ -190,39 +158,27 @@ func newGoE2ERemote(t *testing.T) (bare string) {
 	return bare
 }
 
-// newGoE2EAIClient is a mock AI endpoint canned to answer with the Go
-// seed patch.
-func newGoE2EAIClient(t *testing.T) *aiclient.Client {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(goSeedResponse)
-		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, body)
-	}))
-	t.Cleanup(srv.Close)
-	return aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
-}
-
-// TestSolveLiveFixStepInSandbox is the acceptance test for the wiring:
-// a live solve runs the fix step (patch apply, then the image's
-// verification steps) in the stubbed ephemeral container; the patch
-// lands through the container, the commit/push/PR then proceed natively.
-func TestSolveLiveFixStepInSandbox(t *testing.T) {
+// TestSolveLiveAgentInSandbox is the wiring acceptance test: a live
+// solve with an explicit image runs the built-in agent in the wrapper
+// container over it; the agent's changes land through the container,
+// the commit/push/PR then proceed natively.
+func TestSolveLiveAgentInSandbox(t *testing.T) {
 	gitAvailable(t)
+	testpi.Install(t)
 	stubLogPath := installDockerStub(t)
 	bare, _ := newE2ERemote(t)
 	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "greet() crashes on empty input"}}, nil)
-	ai := newE2EAIClient(t)
 	log := newSolveLog()
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
+		Agent:  piagent.DefaultRunner,
 		Git:    solve.ExecGit,
 		Log:    log.logf,
 	}, solve.Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
-		Image: "ubuntu:24.04", // explicit → source: flag, patch-apply only
+		Image:       "ubuntu:24.04", // explicit → source: flag; no verify steps
+		AgentConfig: agentConfigForTests(),
 	})
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
@@ -230,14 +186,11 @@ func TestSolveLiveFixStepInSandbox(t *testing.T) {
 	if res.PR == nil {
 		t.Fatal("live run opened no pull request")
 	}
-	if res.Sandbox != "ubuntu:24.04" {
-		t.Errorf("Result.Sandbox = %q, want ubuntu:24.04", res.Sandbox)
+	if res.Sandbox != piagent.WrapperImageName("ubuntu:24.04") {
+		t.Errorf("Result.Sandbox = %q, want the built-in wrapper %q", res.Sandbox, piagent.WrapperImageName("ubuntu:24.04"))
 	}
 	if !log.has("sandbox: ubuntu:24.04 (source: flag)") {
 		t.Errorf("missing the sandbox audit line")
-	}
-	if !log.has("fix step passed") {
-		t.Errorf("missing the fix-step pass line")
 	}
 	// The fix reached the "remote" through the container ...
 	if refs := runE2EGit(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9"); !strings.Contains(refs, "refs/heads/shipyard/issue-9") {
@@ -256,58 +209,64 @@ func TestSolveLiveFixStepInSandbox(t *testing.T) {
 }
 
 // TestSolveLiveSandboxVerificationFailure: a verification step that
-// fails in the sandbox (here: `go build` in a repo with no go.mod)
+// fails in the sandbox (here: `go build` of a tree the agent broke)
 // must stop the run before commit, push, and PR.
 func TestSolveLiveSandboxVerificationFailure(t *testing.T) {
 	gitAvailable(t)
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not installed; the verification step would run on the host through the stub")
+	}
+	testpi.Install(t)
 	installDockerStub(t)
-	bare, _ := newE2ERemote(t)
-	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "greet() crashes on empty input"}}, nil)
-	ai := newE2EAIClient(t)
+	t.Setenv("PI_STUB_FIX_FILE", "main.go")
+	t.Setenv("PI_STUB_FIX_CONTENT", "package main\n// the agent broke the build\n")
+	bare := newGoE2ERemote(t)
+	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "bump the greeting"}}, nil)
 	log := newSolveLog()
 
 	_, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
+		Agent:  piagent.DefaultRunner,
 		Git:    solve.ExecGit,
 		Log:    log.logf,
 	}, solve.Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
-		Image: "golang:1.22", // its `go build ./...` step fails: no go.mod
+		Image:       sandboxGolangImage, // its `go build` step fails on the agent's tree
+		AgentConfig: agentConfigForTests(),
 	})
 	if err == nil {
 		t.Fatal("Solve succeeded although a verification step failed")
 	}
-	if !strings.Contains(err.Error(), "fix step failed in sandbox") {
-		t.Errorf("error = %v, want a sandbox fix-step failure", err)
+	if !strings.Contains(err.Error(), "verify step") {
+		t.Errorf("error = %v, want a failed verification step", err)
 	}
 	if !log.has("sandbox: golang:1.22 (source: flag)") {
 		t.Errorf("missing the sandbox audit line")
 	}
 	if refs := runE2EGit(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9"); strings.TrimSpace(refs) != "" {
-		t.Errorf("branch pushed although the fix step failed: %q", refs)
+		t.Errorf("branch pushed although the verification step failed: %q", refs)
 	}
 }
 
 // TestSolveLiveNoDockerFallsBackNative: a live run without Docker must
-// run the native path exactly as before (apply natively, commit, push,
-// PR) and say so in the audit line.
+// run the agent natively on the host and say so in the audit line.
 func TestSolveLiveNoDockerFallsBackNative(t *testing.T) {
 	gitAvailable(t)
+	testpi.Install(t)
 	bare, _ := newE2ERemote(t)
 	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "greet() crashes on empty input"}}, nil)
-	ai := newE2EAIClient(t)
 	log := newSolveLog()
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub:   githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:       ai,
+		Agent:    piagent.DefaultRunner,
 		Git:      solve.ExecGit,
 		DockerOK: func(context.Context) bool { return false },
 		Log:      log.logf,
 	}, solve.Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
-		Image: "golang:1.22", // irrelevant: no sandbox without Docker
+		Image:       sandboxGolangImage, // irrelevant: no sandbox without Docker
+		AgentConfig: agentConfigForTests(),
 	})
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
@@ -321,29 +280,35 @@ func TestSolveLiveNoDockerFallsBackNative(t *testing.T) {
 	if !log.has("sandbox: off (Docker not available") {
 		t.Errorf("missing the Docker-not-available audit line")
 	}
+	if !log.has("natively on the host") {
+		t.Errorf("missing the native agent line:\n%s", log)
+	}
 	if refs := runE2EGit(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9"); !strings.Contains(refs, "refs/heads/shipyard/issue-9") {
 		t.Errorf("branch not pushed to remote: %q", refs)
 	}
 }
 
-// TestSolveDryRunNeverRunsSandbox: a dry run applies the patch
-// natively and must never touch Docker, whatever is installed.
-func TestSolveDryRunNeverRunsSandbox(t *testing.T) {
+// TestSolveDryRunInSandbox: a dry run with Docker available runs the
+// agent in the sandbox (the agent executes code, so the container is
+// the safe choice even for dry runs) and still commits, pushes, and
+// opens nothing.
+func TestSolveDryRunInSandbox(t *testing.T) {
 	gitAvailable(t)
+	testpi.Install(t)
 	stubLogPath := installDockerStub(t)
 	bare, _ := newE2ERemote(t)
 	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "greet() crashes on empty input"}}, nil)
-	ai := newE2EAIClient(t)
 	log := newSolveLog()
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
+		Agent:  piagent.DefaultRunner,
 		Git:    solve.ExecGit,
 		Log:    log.logf,
 	}, solve.Options{
 		Owner: "towner", Repo: "trepo", IssueNumber: 9,
-		Image: "golang:1.22", DryRun: true,
+		DryRun:      true,
+		AgentConfig: agentConfigForTests(),
 	})
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
@@ -351,10 +316,14 @@ func TestSolveDryRunNeverRunsSandbox(t *testing.T) {
 	if res.PR != nil {
 		t.Error("dry run opened a pull request")
 	}
-	if !log.has("sandbox: off (dry-run)") {
-		t.Errorf("missing the dry-run audit line")
+	if refs := runE2EGit(t, "", "ls-remote", "--heads", bare, "shipyard/issue-9"); strings.TrimSpace(refs) != "" {
+		t.Errorf("dry run pushed a branch: %q", refs)
 	}
-	if stubLog := readStubLog(t, stubLogPath); strings.Contains(stubLog, "docker run") {
-		t.Errorf("dry run invoked the sandbox:\n%s", stubLog)
+	if !log.has("dry run") {
+		t.Errorf("missing the dry-run notice:\n%s", log)
+	}
+	// The agent ran in the stubbed container ...
+	if stubLog := readStubLog(t, stubLogPath); !strings.Contains(stubLog, "docker run") {
+		t.Errorf("dry run did not use the sandbox (Docker was available):\n%s", stubLog)
 	}
 }

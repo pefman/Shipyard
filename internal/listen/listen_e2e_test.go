@@ -1,9 +1,10 @@
 package listen
 
-// End-to-end tests for listen mode: real git (clone, apply, commit,
-// push) against a local bare "remote", with the GitHub API and the AI
-// endpoint served by in-process mocks. They exercise the same code the
-// CLI runs, minus the real GitHub/AI hosts.
+// End-to-end tests for listen mode: real git (clone, agent run,
+// commit, push) against a local bare "remote", with the GitHub API
+// served by an in-process mock and the built-in pi agent stubbed on
+// PATH (internal/testpi). They exercise the same code the CLI runs,
+// minus the real GitHub host and the real agent.
 
 import (
 	"bytes"
@@ -19,9 +20,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/piagent"
 	"github.com/pefman/Shipyard/internal/solve"
+	"github.com/pefman/Shipyard/internal/testpi"
 )
 
 func gitAvailable(t *testing.T) {
@@ -33,17 +35,14 @@ func gitAvailable(t *testing.T) {
 
 const (
 	seedHello = "def greet(name):\n    return \"Hello, \" + name\n"
-	seedPatch = "diff --git a/hello.py b/hello.py\n" +
-		"index 1234567..89abcde 100644\n" +
-		"--- a/hello.py\n" +
-		"+++ b/hello.py\n" +
-		"@@ -1,2 +1,4 @@\n" +
-		" def greet(name):\n" +
-		"+    if not name:\n" +
-		"+        return \"Hello, stranger\"\n" +
-		"     return \"Hello, \" + name\n"
-	seedResponse = "greet() crashes on empty input; it now returns a fallback greeting.\n" +
-		"```diff\n" + seedPatch + "```\n"
+
+	// seedHelloFixed is what the stub agent writes when it "fixes"
+	// the hello.py issue (it is also the stub's default fix content).
+	seedHelloFixed = `def greet(name):
+    if not name:
+        return "Hello, stranger"
+    return "Hello, " + name
+`
 )
 
 type e2eFakeGitHub struct {
@@ -118,15 +117,25 @@ func newE2EGitHub(t *testing.T, cloneURL string, issues []testIssue, existing []
 	return f
 }
 
-func newE2EAIClient(t *testing.T) *aiclient.Client {
+// agentDeps builds the listen deps for the end-to-end tests: the stub
+// agent on PATH as engine and the native run path (no Docker), so the
+// tests never need a Docker daemon or a live model. The stub agent
+// "fixes" hello.py by default (its default fix content is
+// seedHelloFixed) and leaves the tree untouched for issues it does not
+// recognize.
+func agentDeps(t *testing.T, gh *e2eFakeGitHub) Deps {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(seedResponse)
-		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%s}}]}`, body)
-	}))
-	t.Cleanup(srv.Close)
-	return aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
+	testpi.Install(t)
+	return Deps{
+		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
+		Agent:  piagent.DefaultRunner,
+		Git:    solve.ExecGit,
+		// Native agent path: the stub pi binary on PATH does the work
+		// (the sandbox wiring is covered by
+		// solve_sandbox_e2e_test.go with a stub docker binary).
+		DockerOK: func(context.Context) bool { return false },
+		Log:      func(format string, args ...any) {},
+	}
 }
 
 // newE2ERemote creates a bare repo plus a working seed checkout pushed
@@ -171,28 +180,19 @@ func mustE2E(t *testing.T, err error) {
 
 // TestListenE2E is the acceptance test for listen mode against real
 // git: one poll pass over a repo with an open issue clones the repo,
-// solves the issue, pushes the fix branch, and opens a pull request;
-// the state file records it.
+// runs the agent on it, pushes the fix branch, and opens a pull
+// request; the state file records it.
 func TestListenE2E(t *testing.T) {
 	gitAvailable(t)
 	bare, _ := newE2ERemote(t)
 	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "greet() crashes on empty input"}}, nil)
-	ai := newE2EAIClient(t)
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state.json")
-	d := Deps{
-		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
-		Git:    solve.ExecGit,
-		// Native fix-step path: the end-to-end tests must not depend
-		// on a Docker daemon (the sandbox wiring is covered by
-		// solve_sandbox_e2e_test.go with a stub docker binary).
-		DockerOK: func(context.Context) bool { return false },
-		Log:      func(format string, args ...any) {},
-	}
+	d := agentDeps(t, gh)
 
 	out, err := d.RunOnce(context.Background(), Options{
 		Owner: "towner", Repo: "trepo", StateFile: stateFile,
+		AgentConfig: agentConfigForTests(),
 	})
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -226,21 +226,14 @@ func TestListenE2ESecondPassSkips(t *testing.T) {
 	gitAvailable(t)
 	bare, _ := newE2ERemote(t)
 	gh := newE2EGitHub(t, bare, []testIssue{{number: 9, title: "greet() crashes on empty input"}}, nil)
-	ai := newE2EAIClient(t)
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state.json")
-	d := Deps{
-		GitHub:   githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:       ai,
-		Git:      solve.ExecGit,
-		DockerOK: func(context.Context) bool { return false },
-		Log:      func(format string, args ...any) {},
-	}
+	d := agentDeps(t, gh)
 
-	if _, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile}); err != nil {
+	if _, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile, AgentConfig: agentConfigForTests()}); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
-	out, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile})
+	out, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile, AgentConfig: agentConfigForTests()})
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
@@ -259,19 +252,12 @@ func TestListenE2ERecoveryFromLostState(t *testing.T) {
 	gh := newE2EGitHub(t, bare,
 		[]testIssue{{number: 9, title: "greet() crashes on empty input"}},
 		[]githubclientPR{{issue: 9, number: 42, title: "Fix #9", state: "open", htmlURL: "https://github.com/towner/trepo/pull/42"}})
-	ai := newE2EAIClient(t)
-	d := Deps{
-		GitHub:   githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:       ai,
-		Git:      solve.ExecGit,
-		DockerOK: func(context.Context) bool { return false },
-		Log:      func(format string, args ...any) {},
-	}
+	d := agentDeps(t, gh)
 
 	// Fresh state file (lost state): the existing-PR check must seed
 	// it and skip the solve.
 	stateFile := filepath.Join(t.TempDir(), "state.json")
-	out, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile})
+	out, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile, AgentConfig: agentConfigForTests()})
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}

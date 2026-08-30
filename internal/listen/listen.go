@@ -1,6 +1,7 @@
 // Package listen implements Shipyard's listen mode: it polls a GitHub
 // repository for open issues and runs the core solving flow
-// (internal/solve) on every issue that is new — or has no pull request
+// (internal/solve — the built-in pi coding agent, see internal/piagent)
+// on every issue that is new — or has no pull request
 // yet — skipping ones that have already been processed. It is designed
 // to run unattended (e.g. in a container): start it once and it keeps
 // watching the repo, opening a PR per issue.
@@ -14,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
 	"github.com/pefman/Shipyard/internal/guardrails"
+	"github.com/pefman/Shipyard/internal/piagent"
 	"github.com/pefman/Shipyard/internal/sandbox"
 	"github.com/pefman/Shipyard/internal/solve"
 )
@@ -53,19 +54,27 @@ type Options struct {
 	// GitHub token).
 	GitURL string
 
-	// IncludeFiles are repo-relative files embedded in every prompt.
-	IncludeFiles []string
+	// AgentConfig is the agent's endpoint/model configuration, passed
+	// through to the solving flow per issue.
+	AgentConfig piagent.Config
+	// AgentMaxTurns caps the agent's assistant turns per issue;
+	// <= 0 selects piagent.DefaultMaxTurns.
+	AgentMaxTurns int
+	// AgentTimeout caps the agent run's wall clock per issue;
+	// <= 0 selects piagent.DefaultTimeout.
+	AgentTimeout time.Duration
 
-	// Image names the sandbox image the fix step runs in (live runs
-	// only; the --image flag). Empty: auto-detect from the repository.
+	// Image names the language image the sandbox container is built on
+	// (live runs only; the --image flag). Empty: auto-detect from the
+	// repository. The built-in pi runtime is added by the wrapper image.
 	Image string
 
 	// DryRun stops each solve after the patch is applied: nothing is
 	// committed, pushed, or opened.
 	DryRun bool
 
-	// Verbose logs the full AI conversation (prompt, response,
-	// thinking, diagnostics) per issue through Deps.Log, with the
+	// Verbose logs the agent's raw event lines in addition to the
+	// rendered progress lines, per issue through Deps.Log, with the
 	// usual per-issue prefix (the --verbose flag, env SHIPYARD_VERBOSE).
 	// Off by default.
 	Verbose bool
@@ -105,16 +114,14 @@ type Options struct {
 type Deps struct {
 	// GitHub talks to the GitHub API (issues, pull requests, repos).
 	GitHub *githubclient.Client
-	// AI is the chat-completions client used by the solving flow.
-	AI *aiclient.Client
+	// Agent runs the built-in pi coding agent on each issue's checkout
+	// (the solving engine); nil uses piagent.DefaultRunner.
+	Agent piagent.Runner
 	// Git runs git commands; nil uses solve.ExecGit.
 	Git solve.GitRunner
-	// DockerOK reports whether the fix step can run in a sandbox;
+	// DockerOK reports whether the agent run can happen in a sandbox;
 	// nil uses sandbox.DockerAvailable.
 	DockerOK func(ctx context.Context) bool
-	// RunInSandbox executes the fix step in an ephemeral container;
-	// nil uses sandbox.Run.
-	RunInSandbox func(ctx context.Context, spec sandbox.RunSpec) (*sandbox.RunResult, error)
 	// Log receives per-run and per-issue progress output; nil logs to
 	// stderr.
 	Log func(format string, args ...any)
@@ -151,8 +158,11 @@ type PassOutcome struct {
 // later pass. A failure that takes the whole pass down (e.g. the issue
 // listing itself fails) is returned as an error.
 func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
-	if d.GitHub == nil || d.AI == nil {
-		return nil, fmt.Errorf("listen: Deps.GitHub and Deps.AI are required")
+	if d.GitHub == nil {
+		return nil, fmt.Errorf("listen: Deps.GitHub is required")
+	}
+	if d.Agent == nil {
+		d.Agent = piagent.DefaultRunner
 	}
 	if o.Owner == "" || o.Repo == "" {
 		return nil, fmt.Errorf("listen: owner/repo is required")
@@ -244,8 +254,11 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 // the listener retries on the next tick. Run returns nil after the
 // shutdown.
 func (d *Deps) Run(ctx context.Context, o Options) error {
-	if d.GitHub == nil || d.AI == nil {
-		return fmt.Errorf("listen: Deps.GitHub and Deps.AI are required")
+	if d.GitHub == nil {
+		return fmt.Errorf("listen: Deps.GitHub is required")
+	}
+	if d.Agent == nil {
+		d.Agent = piagent.DefaultRunner
 	}
 	if o.Owner == "" || o.Repo == "" {
 		return fmt.Errorf("listen: owner/repo is required")
@@ -288,7 +301,7 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 	// the active guardrails (repos, labels, max-prs), so a long-running
 	// container's first line is an audit line.
 	if o.DryRun {
-		log("dry-run mode: patches are applied but nothing is committed, pushed, or opened (pass --live or set SHIPYARD_MODE=live to go live); guardrails: %s", allow.Summary())
+		log("dry-run mode: the agent's changes are kept but nothing is committed, pushed, or opened (pass --live or set SHIPYARD_MODE=live to go live); guardrails: %s", allow.Summary())
 	} else if allow.Configured() {
 		log("live mode: guardrails: %s; max-prs: %d", allow.Summary(), cap.Max())
 	} else if o.All {
@@ -297,22 +310,20 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 		log("live mode: WARNING: UNGUARDED — no repo or label allowlists (acknowledged with --all or the hidden --i-know-this-is-unguarded): this run may act on any issue in %s/%s; max-prs: %d", o.Owner, o.Repo, cap.Max())
 	}
 	log("listening on %s/%s: every %s, state in %s", o.Owner, o.Repo, o.Interval, stateFile(o.StateFile))
+	log("engine: pi-agent (built-in, pi %s): model %s via %s", piagent.Version, o.AgentConfig.Model, solve.RedactCredentials(o.AgentConfig.Endpoint))
 	if len(o.Labels) > 0 {
 		log("label filter: %s", strings.Join(o.Labels, ", "))
 	}
-	if o.DryRun {
-		log("sandbox: off (dry-run)")
+	// Startup audit line: whether the agent runs in a sandbox. Dry runs
+	// include it — the agent executes code, so the container is the
+	// safe choice for dry runs alike. The exact image is auto-detected
+	// per checkout, so it is reported per issue by the solving flow.
+	if !d.dockerOK()(ctx) {
+		log("sandbox: off (Docker not available: the agent runs natively on the host)")
+	} else if o.Image != "" {
+		log("sandbox: %s (source: flag)", o.Image)
 	} else {
-		// Startup audit line: whether live fix steps run in a sandbox.
-		// The exact image is auto-detected per checkout, so it is
-		// reported per issue by the solving flow.
-		if !d.dockerOK()(ctx) {
-			log("sandbox: off (Docker not available: the fix step runs natively on the host)")
-		} else if o.Image != "" {
-			log("sandbox: %s (source: flag)", o.Image)
-		} else {
-			log("sandbox: on (image: auto-detected per repository)")
-		}
+		log("sandbox: on (image: auto-detected per repository)")
 	}
 
 	ticker := time.NewTicker(o.Interval)
@@ -346,22 +357,23 @@ func (d *Deps) solveOne(ctx context.Context, o Options, issue *githubclient.Issu
 		git = solve.ExecGit
 	}
 	return solve.Solve(ctx, solve.Deps{
-		GitHub:       d.GitHub,
-		AI:           d.AI,
-		Git:          git,
-		DockerOK:     d.DockerOK,
-		RunInSandbox: d.RunInSandbox,
-		Log:          d.issueLog(issue.Number),
+		GitHub:   d.GitHub,
+		Agent:    d.Agent,
+		Git:      git,
+		DockerOK: d.DockerOK,
+		Log:      d.issueLog(issue.Number),
 	}, solve.Options{
-		Owner:        o.Owner,
-		Repo:         o.Repo,
-		IssueNumber:  issue.Number,
-		GitURL:       o.GitURL,
-		Base:         o.Base,
-		IncludeFiles: o.IncludeFiles,
-		Image:        o.Image,
-		DryRun:       o.DryRun,
-		Verbose:      o.Verbose,
+		Owner:         o.Owner,
+		Repo:          o.Repo,
+		IssueNumber:   issue.Number,
+		GitURL:        o.GitURL,
+		Base:          o.Base,
+		Image:         o.Image,
+		AgentConfig:   o.AgentConfig,
+		AgentMaxTurns: o.AgentMaxTurns,
+		AgentTimeout:  o.AgentTimeout,
+		DryRun:        o.DryRun,
+		Verbose:       o.Verbose,
 	})
 }
 
