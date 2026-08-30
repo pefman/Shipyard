@@ -150,6 +150,72 @@ func TestSolveVerboseRedactsCredentials(t *testing.T) {
 	}
 }
 
+// TestSolveVerboseLogsDiagnosticsOnFailedCall: a failed AI call (HTTP 500
+// from the endpoint) must still land its diagnostics in the verbose log —
+// failed local-model calls are the whole point of the feature — even
+// though Solve itself returns an error.
+func TestSolveVerboseLogsDiagnosticsOnFailedCall(t *testing.T) {
+	gitAvailable(t)
+	_, workdir := newFakeRemote(t)
+	gh := newFakeGitHub(t, "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "server boom"}`))
+	}))
+	t.Cleanup(srv.Close)
+	ai := aiclient.NewClient(srv.URL+"/v1", "ai-key", "mock-model")
+
+	var buf bytes.Buffer
+	d := capturingDeps(gh, ai, t, &buf)
+	if _, err := Solve(context.Background(), d, Options{
+		Owner: "towner", Repo: "trepo", IssueNumber: 9,
+		Workdir: workdir, Verbose: true,
+	}); err == nil {
+		t.Fatal("expected Solve to fail when the AI endpoint returns 500")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "AI response: HTTP 500") {
+		t.Errorf("the failed call's diagnostics must be in the verbose log:\n%s", logged)
+	}
+	if strings.Contains(logged, "HTTP 0 ") {
+		t.Errorf("no 'HTTP 0' line expected when the endpoint answered:\n%s", logged)
+	}
+}
+
+// TestSolveVerboseAnnouncesTransportFailure: no response at all (the
+// endpoint is unreachable) must not print "HTTP 0 in 0s".
+func TestSolveVerboseAnnouncesTransportFailure(t *testing.T) {
+	gitAvailable(t)
+	_, workdir := newFakeRemote(t)
+	gh := newFakeGitHub(t, "")
+	// A server that closes immediately after starting: the client
+	// gets a transport error, no status line.
+	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := closed.URL
+	closed.Close()
+	ai := aiclient.NewClient(url+"/v1", "ai-key", "mock-model")
+
+	var buf bytes.Buffer
+	d := capturingDeps(gh, ai, t, &buf)
+	if _, err := Solve(context.Background(), d, Options{
+		Owner: "towner", Repo: "trepo", IssueNumber: 9,
+		Workdir: workdir, Verbose: true,
+	}); err == nil {
+		t.Fatal("expected Solve to fail when the AI endpoint is unreachable")
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, "HTTP 0 ") {
+		t.Errorf("a transport failure must not read 'HTTP 0 in 0s':\n%s", logged)
+	}
+	if !strings.Contains(logged, "no HTTP response received") {
+		t.Errorf("the transport failure must be announced:\n%s", logged)
+	}
+}
+
 // TestSolveNotVerboseIsUnchanged: off by default — no conversation in
 // the log, and the log lines are the same ones as before verbose
 // existed.

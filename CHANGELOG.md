@@ -17,6 +17,19 @@ Notable changes to Shipyard, newest first.
   256 KiB) is rendered as size plus first/last lines, omission announced,
   never silent.
 
+### Fixed (SHI-46, follow-up to the review of #19)
+
+- Verbose diagnostics are now logged for a **failed** AI call too
+  (HTTP 500 from a local endpoint, a non-JSON body, …): the
+  `AI response: HTTP 500 in 2.3s; …` line lands in the log before the
+  run aborts. A transport-level failure (no response at all) announces
+  itself instead of printing `HTTP 0 in 0s`.
+- The verbose rendering of an oversized payload with too few lines to
+  summarize line-wise (a wall of newline-free prose — exactly what weak
+  local models emit) now falls back to a byte-based head/tail slice
+  (first/last 2 KiB, omission announced) instead of dropping the
+  content entirely.
+
 ### Added (SHI-44)
 
 - `--all` (on both `solve` and `listen`): "no allowlist on this axis,

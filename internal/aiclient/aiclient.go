@@ -151,7 +151,9 @@ const (
 // Verbatim renders text for the verbose log: in full at or below
 // verboseFullLimit, otherwise as a size annotation plus the first and
 // last lines. When the content is cut, the cut is announced — it is
-// never silent.
+// never silent. An oversized payload with too few lines to summarize
+// line-wise (a wall of newline-free prose) falls back to a byte-based
+// head/tail slice.
 func Verbatim(s string) string {
 	if len(s) <= verboseFullLimit {
 		return s
@@ -160,6 +162,15 @@ func Verbatim(s string) string {
 	edge := verboseEdgeLines
 	if edge*2 >= len(all) {
 		edge = len(all) / 3
+	}
+	if edge < 1 {
+		const edgeBytes = 2 << 10
+		head := s[:edgeBytes]
+		tail := s[len(s)-edgeBytes:]
+		return fmt.Sprintf(
+			"[%d bytes in a long block with too few lines to summarize line-wise; the middle %d bytes are omitted from this log line — the omission is announced, not silent]\n\n[first %d bytes]\n%s\n\n[... %d middle bytes omitted ...]\n\n[last %d bytes]\n%s",
+			len(s), len(s)-2*edgeBytes, edgeBytes, head, len(s)-2*edgeBytes, edgeBytes, tail,
+		)
 	}
 	head := strings.Join(all[:edge], "\n")
 	tail := strings.Join(all[len(all)-edge:], "\n")
@@ -185,8 +196,14 @@ func (c *Client) VerboseRequestLines(prompt string) []string {
 // "length" finish is announced as a response truncated by the token
 // limit, the most common local-model failure mode), the full response
 // content, and the thinking/reasoning block when the endpoint returns
-// one.
+// one. It must also read sensibly for a failed call: when the endpoint
+// answered non-2xx the diagnostics are the point, and when no response
+// arrived at all (transport-level failure) it says so instead of
+// printing "HTTP 0 in 0s".
 func (c *Client) VerboseCompletionLines(comp Completion) []string {
+	if comp.HTTPStatus == 0 {
+		return []string{"AI response: no HTTP response received (transport-level failure: connection error or timeout); the call error above carries the details"}
+	}
 	finish := comp.FinishReason
 	if finish == "" {
 		finish = "(not reported by the endpoint)"
@@ -195,7 +212,12 @@ func (c *Client) VerboseCompletionLines(comp Completion) []string {
 	if comp.FinishReason == "length" {
 		diag += " — response truncated by token limit: the model stopped at its maximum output length, so an unfinished answer (e.g. prose instead of a diff, or a diff cut mid-block) is to be expected here"
 	}
-	lines := []string{diag, "AI response (content):", Verbatim(comp.Content)}
+	lines := []string{diag}
+	if comp.Content != "" {
+		lines = append(lines, "AI response (content):", Verbatim(comp.Content))
+	} else {
+		lines = append(lines, "AI response (content): (none — the endpoint returned no usable body)")
+	}
 	if comp.Reasoning != "" {
 		lines = append(lines, "AI thinking (reasoning_content, as reported by the endpoint):", Verbatim(comp.Reasoning))
 	}

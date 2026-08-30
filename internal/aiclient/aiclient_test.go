@@ -179,6 +179,44 @@ func TestVerboseCompletionLines(t *testing.T) {
 	}
 }
 
+// TestVerbatimOversizedSingleLine: an oversized payload with no newlines
+// (a wall of prose — what weak local models produce) must fall back to a
+// byte-based head/tail slice and still show content, not "first 0 lines".
+func TestVerbatimOversizedSingleLine(t *testing.T) {
+	marker := "MIDDLE-MARKER-BYTES"
+	half := (verboseFullLimit + 8192 + len(marker)) / 2
+	s := strings.Repeat("a", half) + marker + strings.Repeat("b", half)
+	if len(s) <= verboseFullLimit {
+		t.Fatalf("fixture is %d bytes, must exceed the %d-byte limit", len(s), verboseFullLimit)
+	}
+
+	rendered := Verbatim(s)
+	if rendered == s {
+		t.Fatal("oversized single-line content must not be dumped in full")
+	}
+	if strings.Contains(rendered, marker) {
+		t.Errorf("middle bytes must be omitted:\n%s", rendered)
+	}
+	for _, want := range []string{"omitted", "first 2048 bytes", "last 2048 bytes", strings.Repeat("a", 20), strings.Repeat("b", 20)} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendering missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestVerboseCompletionLinesTransportFailure: no response at all
+// (connection refused, timeout) must not print "HTTP 0 in 0s".
+func TestVerboseCompletionLinesTransportFailure(t *testing.T) {
+	c := NewClient("http://127.0.0.1:1/v1", "", "test-model")
+	joined := strings.Join(c.VerboseCompletionLines(Completion{}), "\n")
+	if strings.Contains(joined, "HTTP 0") {
+		t.Errorf("transport failure must not read 'HTTP 0 in 0s':\n%s", joined)
+	}
+	if !strings.Contains(joined, "no HTTP response received") {
+		t.Errorf("transport failure must be announced:\n%s", joined)
+	}
+}
+
 // TestVerboseCompletionLinesLengthFinish: a length finish_reason must be
 // surfaced explicitly — the most common local-model failure mode.
 func TestVerboseCompletionLinesLengthFinish(t *testing.T) {

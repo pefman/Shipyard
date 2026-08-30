@@ -472,7 +472,10 @@ endpoint returns one, and the call's HTTP status, latency, and
 *response truncated by token limit*, the most common local-model failure
 mode. It is off by default and changes nothing else: the raw-response temp
 file is still written, secret redaction still applies (no API keys in
-logs), and with `listen` the lines carry the usual per-issue prefix:
+logs), and with `listen` the lines carry the usual per-issue prefix. The
+diagnostics are logged for failed calls too — an `HTTP 500 in 2.3s`
+line from a misbehaving local endpoint, or an explicit note when no
+response arrives at all (transport-level failure):
 
 ```sh
 shipyard solve --repo owner/repo --issue 42 --verbose
@@ -491,7 +494,9 @@ issue #42: Here is an attempt: I would first …
 
 Extremely long prompts and responses (over 256 KiB) are rendered as their
 size plus their first and last lines, with the omission announced in the
-log — never truncated silently.
+log — never truncated silently. A long block with too few lines to
+summarize line-wise (a wall of newline-free prose) falls back to its
+first and last 2 KiB, again announced.
 
 ## End-to-end test runs
 
