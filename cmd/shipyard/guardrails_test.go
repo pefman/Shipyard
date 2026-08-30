@@ -2,10 +2,33 @@ package main
 
 import (
 	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/pefman/Shipyard/internal/guardrails"
 )
+
+// stderrOf temporarily reroutes os.Stderr and returns what fn writes to
+// it, so the audit-line output of applyGuardrails is testable.
+func stderrOf(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+	fn()
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading captured stderr: %v", err)
+	}
+	return string(out)
+}
 
 // TestApplyGuardrailsResolution covers the flag-wins-over-environment
 // rule and the environment fallbacks for the guardrail settings.
@@ -91,5 +114,41 @@ func TestApplyGuardrailsRepoGate(t *testing.T) {
 	// Invalid allowlist entries are a configuration error.
 	if _, _, err := applyGuardrails(guardrailInput{reposFlag: "justowner", owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err == nil {
 		t.Error("an invalid repo allowlist entry: expected an error")
+	}
+}
+
+// TestApplyGuardrailsExplicitAll: --all marks the repo/label axis as
+// explicitly unrestricted ("no allowlist, on purpose"): an unguarded
+// live run starts, the audit line says the run is deliberately
+// unguarded, and --all combined with a set allowlist is a
+// configuration error.
+func TestApplyGuardrailsExplicitAll(t *testing.T) {
+	t.Setenv(envRepos, "")
+	t.Setenv(envLabels, "")
+	t.Setenv(envMaxPRs, "")
+
+	// --all alone lets an unguarded live run start ...
+	if _, _, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: false, quiet: true, all: true, maxPRsFlag: -1}); err != nil {
+		t.Fatalf("--all alone: %v, want the run to start", err)
+	}
+	// ... and the audit line reports the explicitly unrestricted axis.
+	out := stderrOf(t, func() {
+		if _, _, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: false, all: true, maxPRsFlag: 2}); err != nil {
+			t.Errorf("--all (audit line): %v", err)
+		}
+	})
+	if !strings.Contains(out, "guardrails: NONE (explicit --all); max-prs: 2") {
+		t.Errorf("audit output = %q, want the explicit --all audit line", out)
+	}
+	// --all conflicts with any set allowlist: flag or environment.
+	if _, _, err := applyGuardrails(guardrailInput{reposFlag: "towner/trepo", all: true, owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Errorf("--all + --repos = %v, want the conflict error", err)
+	}
+	if _, _, err := applyGuardrails(guardrailInput{labelsFlag: "bug", all: true, owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Errorf("--all + --labels = %v, want the conflict error", err)
+	}
+	t.Setenv(envRepos, "towner/trepo")
+	if _, _, err := applyGuardrails(guardrailInput{all: true, owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Errorf("--all + SHIPYARD_REPOS = %v, want the conflict error", err)
 	}
 }

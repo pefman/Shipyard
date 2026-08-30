@@ -6,8 +6,10 @@
 // opted in for (an allowed repository and/or an allowed label), and a
 // single run can never open more than --max-prs pull requests. A run
 // with neither allowlist set is "unguarded" and is refused unless the
-// operator explicitly acknowledges it with --i-know-this-is-unguarded.
-// That refusal applies to live runs only: dry runs commit nothing and
+// operator explicitly acknowledges it — with --all ("no allowlist on
+// this axis, on purpose") or the hidden alias
+// --i-know-this-is-unguarded. That refusal applies to live runs only:
+// dry runs commit nothing and
 // open no pull requests, so they need no allowlist (and listen starts
 // in dry-run mode by default — see Mode).
 package guardrails
@@ -80,16 +82,16 @@ func ResolveMode(live, dryRun bool, modeEnv string, def Mode) (Mode, error) {
 
 // ErrUnguarded is returned when a live run has neither a repo nor a
 // label allowlist set and the operator has not acknowledged the risk
-// with --i-know-this-is-unguarded.
+// with --all (or its hidden alias --i-know-this-is-unguarded).
 var ErrUnguarded = errors.New(`no repo or label allowlist is set: this run would be unguarded and could act on any issue in the repository.
 
 Shipyard only solves issues you have opted in for:
   --repos   comma-separated owner/repo allowlist (env SHIPYARD_REPOS)
   --labels  comma-separated label allowlist  (env SHIPYARD_LABELS)
 When either is set, only issues in allowed repos carrying an allowed
-label are solved. With neither set, passing
---i-know-this-is-unguarded acknowledges the risk and lets the run
-proceed.`)
+label are solved. With neither set, --all marks the allowlist axis as
+explicitly unrestricted and lets the run proceed (the hidden flag
+--i-know-this-is-unguarded does the same).`)
 
 // ParseList splits a comma-separated value (a flag or an env var) into
 // trimmed, non-empty entries.
@@ -187,15 +189,21 @@ func (a *Allow) LabelsAllowed(issueLabels []string) bool {
 }
 
 // Gate applies the unguarded rule: a run with neither allowlist set
-// may proceed only if the operator passed --i-know-this-is-unguarded.
+// may proceed only if the operator acknowledged it — --all (explicitly
+// unrestricted) or the hidden alias --i-know-this-is-unguarded.
 // It returns ErrUnguarded (or nil); the caller logs the loud warning
 // in both refusal and acknowledgment cases.
-func (a *Allow) Gate(iKnowThisIsUnguarded bool) error {
-	if a.Configured() || iKnowThisIsUnguarded {
+func (a *Allow) Gate(acknowledged bool) error {
+	if a.Configured() || acknowledged {
 		return nil
 	}
 	return ErrUnguarded
 }
+
+// SummaryExplicitAll renders the allowlist axis on the audit line when
+// the operator marked it explicitly unrestricted with --all ("no
+// allowlist on this axis, on purpose").
+const SummaryExplicitAll = "NONE (explicit --all)"
 
 // Summary is a one-line rendering of the guardrails, for audit output.
 func (a *Allow) Summary() string {

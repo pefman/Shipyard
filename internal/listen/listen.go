@@ -76,11 +76,18 @@ type Options struct {
 	MaxPRs int
 
 	// Unguarded reports that the operator acknowledged an unguarded
-	// run (--i-know-this-is-unguarded): with no repo or label
-	// allowlist set, a live run is refused unless this is true. Dry
-	// runs need no acknowledgment: they commit nothing and open no
-	// pull requests.
+	// run (--i-know-this-is-unguarded, the hidden alias of --all):
+	// with no repo or label allowlist set, a live run is refused
+	// unless this (or All) is true. Dry runs need no acknowledgment:
+	// they commit nothing and open no pull requests.
 	Unguarded bool
+
+	// All reports that the operator marked the allowlist axis as
+	// explicitly unrestricted (--all: "no allowlist on this axis, on
+	// purpose"): with no repo or label allowlist set, a live run is
+	// allowed to proceed and the audit line says so. It conflicts
+	// with a set allowlist.
+	All bool
 
 	// PRCap tracks how many pull requests this run has opened; Run
 	// installs one from MaxPRs before the first pass. When nil,
@@ -242,15 +249,20 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 	}
 
 	// Guardrails: a live run with no repo or label allowlist is
-	// refused unless the operator acknowledged it (dry runs are safe
-	// without an allowlist, since they open nothing), and the watched
-	// repo must be on the repo allowlist when one is set.
+	// refused unless the operator acknowledged it (--all or
+	// --i-know-this-is-unguarded; dry runs are safe without an
+	// allowlist, since they open nothing); --all conflicts with a set
+	// allowlist; and the watched repo must be on the repo allowlist
+	// when one is set.
 	allow, err := guardrails.NewAllow(o.Repos, o.Labels)
 	if err != nil {
 		return err
 	}
+	if o.All && allow.Configured() {
+		return fmt.Errorf("conflict: --all (no allowlist on the repo/label axis, on purpose) is set together with an allowlist (%s) — drop --all or drop the allowlist", allow.Summary())
+	}
 	if !o.DryRun {
-		if err := allow.Gate(o.Unguarded); err != nil {
+		if err := allow.Gate(o.All || o.Unguarded); err != nil {
 			return err
 		}
 	}
@@ -273,8 +285,10 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 		log("dry-run mode: patches are applied but nothing is committed, pushed, or opened (pass --live or set SHIPYARD_MODE=live to go live); guardrails: %s", allow.Summary())
 	} else if allow.Configured() {
 		log("live mode: guardrails: %s; max-prs: %d", allow.Summary(), cap.Max())
+	} else if o.All {
+		log("live mode: guardrails: %s; max-prs: %d", guardrails.SummaryExplicitAll, cap.Max())
 	} else {
-		log("live mode: WARNING: UNGUARDED — no repo or label allowlists (acknowledged with --i-know-this-is-unguarded): this run may act on any issue in %s/%s; max-prs: %d", o.Owner, o.Repo, cap.Max())
+		log("live mode: WARNING: UNGUARDED — no repo or label allowlists (acknowledged with --all or the hidden --i-know-this-is-unguarded): this run may act on any issue in %s/%s; max-prs: %d", o.Owner, o.Repo, cap.Max())
 	}
 	log("listening on %s/%s: every %s, state in %s", o.Owner, o.Repo, o.Interval, stateFile(o.StateFile))
 	if len(o.Labels) > 0 {

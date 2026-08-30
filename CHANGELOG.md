@@ -4,6 +4,19 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-44)
+
+- `--all` (on both `solve` and `listen`): "no allowlist on this axis,
+  on purpose." It marks the repo/label allowlist axis as explicitly
+  unrestricted, so a live run with no `--repos`/`--labels` allowlist
+  starts without the `--i-know-this-is-unguarded` sentence-flag, and
+  the startup audit line says so —
+  `live mode: guardrails: NONE (explicit --all); max-prs: N` — so a
+  long-running container's first log line never hides that the run is
+  unguarded. `--all` combined with a set `--repos`/`--labels` allowlist
+  is a configuration error (same treatment as `--live` + `--dry-run`),
+  and `--i-know-this-is-unguarded` remains as a hidden alias of `--all`.
+
 ### Changed (SHI-19)
 
 - **`listen` now starts in dry-run mode by default** — the safe default

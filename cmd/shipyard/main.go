@@ -93,13 +93,11 @@ Guardrails (solve and listen):
                          opened (env SHIPYARD_MAX_PRS; default 3). A live run
                          must be able to open at least one: --max-prs 0 is a
                          dry-run setting, not a live one.
-  --i-know-this-is-unguarded
-                         Proceed with a live run even though no --repos/
-                         --labels allowlist is set. With neither allowlist
-                         set a live run is unguarded — it may act on any
-                         issue in the repository — and is refused unless this
-                         flag is passed. Dry runs are safe without an
-                         allowlist: they open nothing.
+  --all                  Run with no repo/label allowlist, on purpose: marks
+                         the allowlist axis as explicitly unrestricted, so a
+                         live run without one is not refused. Conflicts with a
+                         --repos/--labels allowlist. (The hidden flag
+                         --i-know-this-is-unguarded is a compatible alias.)
 
 Listen flags:
   --repo <repo>          GitHub repository to watch (required; accepted forms
@@ -160,7 +158,8 @@ func runSolve(args []string) error {
 	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
 	labels := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS)")
 	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
-	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set")
+	all := fs.Bool("all", false, "run with no repo/label allowlist, on purpose (explicitly unrestricted)")
+	unguarded := fs.Bool("i-know-this-is-unguarded", false, "hidden alias of --all: proceed even with no repo/label allowlist set")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -179,6 +178,7 @@ func runSolve(args []string) error {
 		reposFlag:  *repos,
 		labelsFlag: *labels,
 		maxPRsFlag: *maxPRs,
+		all:        *all,
 		unguarded:  *unguarded,
 		owner:      owner,
 		repo:       name,
@@ -263,7 +263,8 @@ type guardrailInput struct {
 	reposFlag  string // SHIPYARD_REPOS
 	labelsFlag string // SHIPYARD_LABELS
 	maxPRsFlag int    // SHIPYARD_MAX_PRS; negative means unset
-	unguarded  bool   // --i-know-this-is-unguarded
+	all        bool   // --all: explicitly no allowlist, on purpose
+	unguarded  bool   // --i-know-this-is-unguarded (hidden alias of --all)
 	owner      string
 	repo       string
 	issue      int // issue to solve (solve); unused by listen
@@ -279,11 +280,12 @@ const (
 
 // applyGuardrails resolves the allowlists and the pull-request budget
 // (flag wins over environment), refuses a live run that is unguarded —
-// no repo or label allowlist without --i-know-this-is-unguarded (dry
-// runs are safe without one: they open nothing) — and checks the target
-// repo against the repo allowlist. It prints the audit line (or the
-// unguarded warning) to stderr and returns the parsed allowlist plus the
-// resolved pull-request budget.
+// no repo or label allowlist without --all or its hidden alias
+// --i-know-this-is-unguarded (dry runs are safe without one: they open
+// nothing) — checks the target repo against the repo allowlist, and
+// treats --all combined with a set allowlist as a configuration error.
+// It prints the audit line (or the unguarded warning) to stderr and
+// returns the parsed allowlist plus the resolved pull-request budget.
 func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
 	repos := g.reposFlag
 	if repos == "" {
@@ -296,6 +298,9 @@ func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
 	allow, err := guardrails.NewAllow(guardrails.ParseList(repos), guardrails.ParseList(labels))
 	if err != nil {
 		return nil, 0, err
+	}
+	if g.all && allow.Configured() {
+		return nil, 0, fmt.Errorf("conflict: --all (no allowlist on the repo/label axis, on purpose) is set together with an allowlist (%s) — drop --all or drop the allowlist", allow.Summary())
 	}
 
 	maxPRs := g.maxPRsFlag
@@ -320,7 +325,7 @@ func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
 	// nothing and opens no pull requests, so it is safe without an
 	// allowlist.
 	if !g.dryRun {
-		if err := allow.Gate(g.unguarded); err != nil {
+		if err := allow.Gate(g.all || g.unguarded); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -331,8 +336,10 @@ func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
 		fmt.Fprintf(os.Stderr, "shipyard: guardrails: %s; max-prs: %d\n", allow.Summary(), maxPRs)
 	} else if g.dryRun {
 		fmt.Fprintln(os.Stderr, "shipyard: note: no repo or label allowlist is set — this dry run may act on any issue in the repository, but it opens no pull requests.")
+	} else if g.all {
+		fmt.Fprintf(os.Stderr, "shipyard: guardrails: %s; max-prs: %d\n", guardrails.SummaryExplicitAll, maxPRs)
 	} else {
-		fmt.Fprintln(os.Stderr, "shipyard: WARNING: no repo or label allowlist is set — this live run is UNGUARDED (acknowledged with --i-know-this-is-unguarded) and may act on any issue in the repository.")
+		fmt.Fprintln(os.Stderr, "shipyard: WARNING: no repo or label allowlist is set — this live run is UNGUARDED (acknowledged with --all or the hidden --i-know-this-is-unguarded) and may act on any issue in the repository.")
 	}
 	return allow, maxPRs, nil
 }

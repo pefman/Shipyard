@@ -591,6 +591,65 @@ func TestRunUnguardedWithFlagProceeds(t *testing.T) {
 	gh.mu.Unlock()
 }
 
+// TestRunExplicitAllStartsAndAudits: --all ("no allowlist on this
+// axis, on purpose") lets an unguarded live run start without the
+// sentence-flag, and the first log line is the audit line that tells
+// a long-running container's operator the run is deliberately
+// unguarded.
+func TestRunExplicitAllStartsAndAudits(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	lg := &lineLog{}
+	d := newTestDeps(t, gh, fakeGit{})
+	d.Log = lg.printf
+	// MaxPRs 1 so the run stops on its own once it has proved it ran.
+	err := d.Run(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		All:    true,
+		MaxPRs: 1,
+	})
+	if err != nil {
+		t.Fatalf("Run with --all: %v, want the run to start", err)
+	}
+	first := lg.first()
+	if !strings.HasPrefix(first, "live mode: guardrails: NONE (explicit --all); max-prs: 1") {
+		t.Errorf("first log line = %q, want the explicit --all audit line", first)
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 1 {
+		t.Errorf("%d pull request(s) created, want 1", n)
+	}
+	gh.mu.Unlock()
+}
+
+// TestRunExplicitAllConflictsWithAllowlist: --all is "no allowlist on
+// this axis, on purpose", so combining it with a set allowlist is a
+// configuration error — the same treatment as --live + --dry-run —
+// and the run starts nothing.
+func TestRunExplicitAllConflictsWithAllowlist(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+	for name, o := range map[string]Options{
+		"--all + labels": {
+			Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+			All: true, Labels: []string{"bug"},
+		},
+		"--all + repos": {
+			Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+			All: true, Repos: []string{"towner/trepo"},
+		},
+	} {
+		err := d.Run(context.Background(), o)
+		if err == nil || !strings.Contains(err.Error(), "conflict") {
+			t.Errorf("Run (%s) = %v, want the --all/allowlist conflict", name, err)
+		}
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 0 {
+		t.Errorf("%d pull request(s) created by refused runs, want 0", n)
+	}
+	gh.mu.Unlock()
+}
+
 // TestRunRefusesRepoNotInAllowlist: a listener pointed at a repo that
 // is not on the repo allowlist starts nothing.
 func TestRunRefusesRepoNotInAllowlist(t *testing.T) {
