@@ -4,6 +4,26 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Changed (SHI-19)
+
+- **`listen` now starts in dry-run mode by default** — the safe default
+  for unattended operation: it runs the full solving flow but commits
+  nothing and opens no pull requests. Pass `--live` (or
+  `SHIPYARD_MODE=live`) to deliver; `--dry-run` explicitly forces
+  dry-run, takes precedence over `SHIPYARD_MODE`, and conflicts with
+  `--live`. The one-shot `solve` command is unaffected by this: it runs
+  live unless you pass `--dry-run` (the guardrail gate from SHI-18
+  still applies to it).
+- A live `listen` prints a startup audit line — a long-running
+  container's first log line — confirming the active guardrails
+  (allowlists, pull-request budget), so the deployed configuration is
+  visible at a glance.
+- Docs pass (SHI-20): README "Safety" section finalized; the deploy
+  examples in `docker-compose.yml` (including the new `listen-live`
+  profile) and the Docker run snippets now show the safe default
+  configuration — a dry-run listener, and an allowlist set explicitly
+  for live runs.
+
 ### Added (SHI-18)
 
 - Guardrails for safe unattended operation, on both `solve` and

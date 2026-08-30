@@ -1,28 +1,33 @@
 # Shipyard deployment examples.
 #
 # One-shot solve (the `solve` service is the compose default; pass extra
-# flags after `--` to override the command):
+# flags after `--` to override the command). A live solve with no
+# allowlist set is refused by shipyard (see the README "Safety" section),
+# so set SHIPYARD_REPOS (or SHIPYARD_LABELS) or pass --dry-run:
 #
 #   export SHIPYARD_GITHUB_TOKEN=... SHIPYARD_AI_ENDPOINT=... SHIPYARD_AI_KEY=...
 #   export SHIPYARD_REPO=owner/repo SHIPYARD_ISSUE=42
+#   export SHIPYARD_REPOS=owner/repo   # guardrail for the live run
 #   docker compose run --rm solve
 #   docker compose run --rm solve -- --repo owner/repo --issue 42 --dry-run
 #
-# Long-running listener (listen mode ships with SHI-6,
-# https://github.com/pefman/Shipyard/pull/5; rebuild the image once it is
-# merged into main):
+# Long-running listener (the `listen` profile). The listener starts in
+# DRY-RUN mode (the safe default): it runs the full flow but opens no
+# pull requests:
 #
 #   docker compose --profile listen up -d
 #
-# The listener starts in DRY-RUN mode (the safe default): it runs the
-# full flow but opens no pull requests. To go live, add --live (or
-# SHIPYARD_MODE=live) plus an allowlist — a live run without
-# --repos/SHIPYARD_REPOS or --labels/SHIPYARD_LABELS is refused unless
-# you also pass --i-know-this-is-unguarded:
+# To run it live, use the `listen-live` profile instead: it passes
+# --live and --max-prs, and reads the allowlists from SHIPYARD_REPOS /
+# SHIPYARD_LABELS. At least one allowlist must be set — a live run
+# without --repos/SHIPYARD_REPOS or --labels/SHIPYARD_LABELS is refused
+# by shipyard itself (a clear startup error) unless you also pass
+# --i-know-this-is-unguarded:
 #
-#   SHIPYARD_REPOS=owner/repo docker compose --profile listen up -d
-#   (and add --live after the command, e.g.
-#   command: ["listen", "--repo", "owner/repo", "--live", ...])
+#   export SHIPYARD_REPOS=owner/repo
+#   export SHIPYARD_LABELS=shipyard        # optional second allowlist
+#   export SHIPYARD_MAX_PRS=3              # optional; default 3
+#   docker compose --profile listen-live up -d
 #
 # The listener keeps a state file in /data so already-processed issues
 # survive container restarts.
@@ -37,12 +42,19 @@ services:
       SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
       SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
       SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
+      # guardrails: a live solve with neither allowlist set is refused;
+      # export SHIPYARD_REPOS=owner/repo (and/or SHIPYARD_LABELS) to go live
+      SHIPYARD_REPOS: "${SHIPYARD_REPOS:-}"
+      SHIPYARD_LABELS: "${SHIPYARD_LABELS:-}"
+      SHIPYARD_MAX_PRS: "${SHIPYARD_MAX_PRS:-}"
 
   listen:
     build: .
     image: shipyard:local
     profiles: ["listen"]
     restart: unless-stopped
+    # DRY-RUN is the default: nothing is committed and no pull requests
+    # are opened. For a live run use the listen-live profile below.
     command:
       [
         "listen",
@@ -55,6 +67,38 @@ services:
       SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
       SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
       SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
+      # allowlists (optional for dry runs; at least one is required for
+      # a live run, which shipyard enforces at startup)
+      SHIPYARD_REPOS: "${SHIPYARD_REPOS:-}"
+      SHIPYARD_LABELS: "${SHIPYARD_LABELS:-}"
+    volumes:
+      - shipyard-state:/data
+
+  # Live listener: passes --live and --max-prs, and requires the repo
+  # allowlist. See the header comment for the environment to export.
+  listen-live:
+    build: .
+    image: shipyard:local
+    profiles: ["listen-live"]
+    restart: unless-stopped
+    command:
+      [
+        "listen",
+        "--repo", "${SHIPYARD_REPO:-owner/repo}",
+        "--interval", "5m",
+        "--state-file", "/data/shipyard-listen-state.json",
+        "--live",
+        "--max-prs", "${SHIPYARD_MAX_PRS:-3}",
+      ]
+    environment:
+      SHIPYARD_GITHUB_TOKEN: "${SHIPYARD_GITHUB_TOKEN:?set SHIPYARD_GITHUB_TOKEN}"
+      SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
+      SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
+      SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
+      # at least one allowlist must be set, otherwise shipyard itself
+      # refuses to start the live run (or pass --i-know-this-is-unguarded)
+      SHIPYARD_REPOS: "${SHIPYARD_REPOS:-}"
+      SHIPYARD_LABELS: "${SHIPYARD_LABELS:-}"
     volumes:
       - shipyard-state:/data
 

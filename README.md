@@ -22,24 +22,51 @@ push, or pull request, printing what it would do. Nothing reaches
 GitHub until you deliberately go live:
 
 ```sh
+# dry run (the default): watch what it would do
+shipyard listen --repo owner/repo
+
+# live: deliver commits, pushes, and pull requests
 shipyard listen --repo owner/repo --live      # or SHIPYARD_MODE=live
 ```
 
-On startup the listener's first log line is an audit line. In live mode
-it confirms the active guardrails — repo/label allowlists
-(`--repos` / `SHIPYARD_REPOS`, `--labels` / `SHIPYARD_LABELS`,
-`--label`) and the pull-request budget (`--max-prs` /
-`SHIPYARD_MAX_PRS`, default 3, so one run can never open more than that
-many pull requests): a long-running container's first line is an audit
-line. A live run with **no repo or label allowlist set is refused**
-unless you acknowledge it with `--i-know-this-is-unguarded`; dry runs
-need no such acknowledgment because they open nothing.
+Live runs are bounded by allowlists and a per-run pull-request budget:
+
+| Control | Flag | Environment | Effect |
+| ------- | ---- | ----------- | ------ |
+| Repo allowlist | `--repos owner/repo,…` | `SHIPYARD_REPOS` | Only issues in these repositories are solved; `listen` refuses to start on a repo outside the list |
+| Label allowlist | `--labels a,b` (on `listen` the repeatable `--label` is equivalent) | `SHIPYARD_LABELS` | Only issues carrying at least one allowed label are solved |
+| Pull-request budget | `--max-prs 5` | `SHIPYARD_MAX_PRS` | Hard per-run cap (default 3): after N pull requests the run exits cleanly with a summary, and issues it did not get to stay open for a later run. `--max-prs 0` is a dry-run setting, not a live one |
+| Unguarded acknowledgment | `--i-know-this-is-unguarded` | — | A live run with **no repo or label allowlist set is refused** unless this flag acknowledges the risk: an unguarded run may act on any issue in the repository |
+
+The gate applies to both commands: `listen` in live mode, and `solve`,
+which runs live unless you pass `--dry-run`. Dry runs need no allowlist
+and no acknowledgment because they commit nothing and open no pull
+requests. Guarded runs print an audit line at startup
+(`shipyard: guardrails: repos: …; labels: …; max-prs: N`), and for a
+live `listen` that audit line is the container's first log line — so a
+long-running deployment's first line is the one that tells you which
+guardrails are active.
+
+Copy-pasteable examples:
+
+```sh
+# live listener restricted to one label, budget of 5 pull requests per run
+shipyard listen --repo owner/repo --live --labels shipyard --max-prs 5
+
+# the same, configured via environment (what a docker compose file sets)
+SHIPYARD_MODE=live SHIPYARD_LABELS=shipyard SHIPYARD_MAX_PRS=5 \
+  shipyard listen --repo owner/repo
+
+# one-shot solve, guarded by the repo allowlist (alternatives: --dry-run
+# or --i-know-this-is-unguarded — see the gate above)
+shipyard solve --repo owner/repo --issue 42 --repos owner/repo
+```
 
 The one-shot `solve` command stays explicit: it always targets the issue
-you name, opens at most one pull request, and `--dry-run` stops it after
-the patch is applied. Compose deployments that want the listener live
-must pass `--live` (or `SHIPYARD_MODE=live`) plus an allowlist on
-purpose.
+you name and opens at most one pull request. Compose deployments that
+want the listener live must pass `--live` (or `SHIPYARD_MODE=live`)
+plus an allowlist on purpose — see
+[Listen mode (long-running)](#listen-mode-long-running).
 
 ## Build (Docker)
 
@@ -50,9 +77,9 @@ unprivileged `shipyard` user. The image is designed to stay well under 50 MB
 (`git` is the heaviest component); check `docker images shipyard` after a
 build.
 
-The image always builds the full repo, so every command and flag that is
-merged into `main` (today: `solve`; once SHI-6 lands: `listen`) is included
-in a rebuild.
+The image always builds the full repo, so both commands (`solve` and
+`listen`) and every flag that is merged into `main` are included in a
+rebuild.
 
 ### Build
 
@@ -71,8 +98,12 @@ docker run --rm \
   -e SHIPYARD_GITHUB_TOKEN="$SHIPYARD_GITHUB_TOKEN" \
   -e SHIPYARD_AI_ENDPOINT=http://localhost:8080 \
   -e SHIPYARD_AI_KEY="${SHIPYARD_AI_KEY:-}" \
+  -e SHIPYARD_REPOS=owner/repo \
   shipyard solve --repo owner/repo --issue 42
 ```
+
+A live `solve` with no allowlist set is refused (see [Safety](#safety)):
+pass `--repos`, `--labels`, `--dry-run`, or `--i-know-this-is-unguarded`.
 
 Or via the bundled compose file (`docker-compose.yml`), which reads the
 same environment variables:
@@ -80,6 +111,7 @@ same environment variables:
 ```sh
 export SHIPYARD_REPO=owner/repo SHIPYARD_ISSUE=42
 export SHIPYARD_GITHUB_TOKEN=... SHIPYARD_AI_ENDPOINT=... SHIPYARD_AI_KEY=...
+export SHIPYARD_REPOS=owner/repo   # guardrail: a live solve needs an allowlist
 docker compose run --rm solve
 # extra flags go after `--`:
 docker compose run --rm solve -- --dry-run --include-files path/to/file.go
@@ -92,26 +124,38 @@ For a custom (unauthenticated) endpoint like `http://localhost:8080` the
 
 ### Listen mode (long-running)
 
-Once [listen mode (SHI-6)](https://github.com/pefman/Shipyard/pull/5) is
-merged into `main` and the image rebuilt, the same image can run a
-long-lived listener that polls the repo's open issues and solves new ones:
+The same image can run a long-lived listener that polls the repo's open
+issues and solves new ones:
 
 ```sh
-# compose (state volume keeps track of processed issues across restarts)
+# compose, dry-run (the default; a state volume keeps track of processed
+# issues across restarts)
 docker compose --profile listen up -d
 
-# or plain docker run
+# …or the same, live with an allowlist, once a dry run has shown what to
+# expect (see Safety)
+SHIPYARD_REPOS=owner/repo SHIPYARD_LABELS=shipyard \
+  docker compose --profile listen-live up -d
+
+# or plain docker run (dry run, the default)
 docker run -d --name shipyard-listen --restart unless-stopped \
   -v shipyard-state:/data \
   -e SHIPYARD_GITHUB_TOKEN=... -e SHIPYARD_AI_ENDPOINT=... \
   shipyard listen --repo owner/repo --interval 5m
+
+# or plain docker run, live with an allowlist
+docker run -d --name shipyard-listen --restart unless-stopped \
+  -v shipyard-state:/data \
+  -e SHIPYARD_GITHUB_TOKEN=... -e SHIPYARD_AI_ENDPOINT=... \
+  -e SHIPYARD_LABELS=shipyard -e SHIPYARD_MAX_PRS=3 \
+  shipyard listen --repo owner/repo --interval 5m --live
 ```
 
 The listener keeps its state file in `/data` (override with
 `--state-file`); mount a volume there so a container restart does not
-re-solve issues. Use `--label` to only solve labeled issues. The
-listener starts in dry-run mode: add `--live` (and an allowlist — see
-[Safety](#safety)) once you have watched a dry run do what you expect.
+re-solve issues. The listener starts in dry-run mode: add `--live` (and
+an allowlist — see [Safety](#safety)) once you have watched a dry run
+do what you expect.
 
 Note for live runs while Shipyard itself is in a container: the sandbox
 needs to start containers from inside (see [Sandbox](#sandbox)), so
@@ -149,8 +193,12 @@ at the URI, the access token is verified via `GET /user` and stored at
 Solves one GitHub issue in a single shot:
 
 ```sh
-shipyard solve --repo owner/repo --issue 42
+shipyard solve --repo owner/repo --issue 42 --repos owner/repo
 ```
+
+A live `solve` is guarded like `listen` (see [Safety](#safety)): with
+no allowlist set it is refused, so pass `--repos` or `--labels`, run
+`--dry-run`, or pass `--i-know-this-is-unguarded`.
 
 Flow:
 
@@ -192,6 +240,7 @@ Shipyard fails fast with actionable errors for the expected failure modes:
 | 401 from the GitHub API | `check that the GitHub token is valid and not expired` |
 | 403 from the GitHub API (e.g. opening the PR) | `this token is missing the permissions GitHub needs here (…)` |
 | `--workdir` has uncommitted changes | `has uncommitted changes; commit or stash them first` |
+| Live run (solve or listen) with no repo/label allowlist set | `no repo or label allowlist is set: this run would be unguarded…` (set an allowlist or pass `--i-know-this-is-unguarded`) |
 | Remote branch name already taken (previous run) | `remote branch … already exists; … pass --branch` |
 | A build/test step fails in the sandbox (live run) | `fix step failed in sandbox: step … — no commit, push, or PR was made` |
 | Docker not installed / daemon down (live run) | `sandbox: off (Docker not available: the fix step runs natively on the host)` |
@@ -243,8 +292,10 @@ Behavior notes:
 - Every log line is prefixed with the issue number, so a long-running
   listener is easy to follow (`journalctl`, `docker logs`, …).
 
-Useful flags: `--interval 5m` (default `1m`), `--live`, `--label
-shipyard`, `--base main`, `--git-url`, `--include-files`, `--image` —
+Useful flags: `--interval 5m` (default `1m`), `--live` / `--dry-run`
+(mode; dry-run is the default), `--repos`, `--labels` / `--label
+shipyard`, `--max-prs`, `--i-know-this-is-unguarded`, `--state-file`,
+`--base main`, `--git-url`, `--include-files`, `--image` —
 plus the same `--provider` / `--ai-endpoint` / `--ai-key` / `--ai-model`
 configuration as `solve` (the default `custom` provider needs no key,
 so a keyless local endpoint works out of the box).
@@ -318,8 +369,12 @@ Flags take precedence over environment variables.
 | `--branch`        | —                         | no       | Branch for the fix (default: `shipyard/issue-<n>`)   |
 | `--include-files` | —                         | no       | Comma-separated repo files to embed in the prompt    |
 | `--git-url`       | —                         | no       | Git clone URL when no `--workdir` is given           |
-| `--dry-run`       | —                         | no       | Stop after applying the patch: no commit/push/PR     |
+| `--dry-run`       | —                         | no       | `solve`: stop after applying the patch (no commit/push/PR); `listen`: dry-run mode — the default for `listen` |
 | `--live`          | `SHIPYARD_MODE`           | no       | `listen` only: commit, push, and open pull requests (the default for `listen` is dry-run; `solve` is always live by default) |
+| `--repos`         | `SHIPYARD_REPOS`          | no       | Comma-separated `owner/repo` allowlist (solve + listen; see [Safety](#safety)) |
+| `--labels`        | `SHIPYARD_LABELS`         | no       | Comma-separated label allowlist (solve + listen; on `listen` the repeatable `--label` is an equivalent flag) |
+| `--max-prs`       | `SHIPYARD_MAX_PRS`        | no       | Stop the run after this many pull requests (default 3; `0` = open none — a dry-run setting) |
+| `--i-know-this-is-unguarded` | —              | no       | Proceed with a live run even though no `--repos`/`--labels` allowlist is set (see [Safety](#safety)) |
 
 `SHIPYARD_GITHUB_API` (env only) overrides the GitHub API base URL
 (default `https://api.github.com`); useful against GHE or in tests.
@@ -340,7 +395,10 @@ model, so provider switches are one flag apart:
 `--ai-model` / `SHIPYARD_AI_MODEL` overrides the preset's default model in
 all cases. The API key is resolved in this order: `--ai-key` flag, then the
 provider's own variable (`SHIPYARD_OPENAI_KEY` / `SHIPYARD_XAI_KEY`), then
-the generic `SHIPYARD_AI_KEY`. Copy-pasteable examples per provider:
+the generic `SHIPYARD_AI_KEY`. The examples below are live runs, so as with
+every live run each needs a guardrail — `--repos owner/repo` (or an
+allowlist env var), `--i-know-this-is-unguarded`, or a `--dry-run` —
+see [Safety](#safety):
 
 ```sh
 # ChatGPT (OpenAI) — preset pins the base URL and default model
@@ -409,7 +467,8 @@ go run ./hack/mockai --port 8765 --response-file /tmp/canned.txt &
 shipyard solve --repo <owner>/<test-repo> --issue <n> \
   --github-token "$SHIPYARD_GITHUB_TOKEN" \
   --provider custom --ai-endpoint http://127.0.0.1:8765/v1 \
-  --dry-run   # try dry-run first; drop it to open a real PR
+  --dry-run   # try dry-run first; to open a real PR drop it and add a
+              # guardrail (e.g. --repos <owner>/<test-repo>)
 ```
 
 Use a dedicated test repo + a test issue for this: the canned patch only
@@ -429,8 +488,10 @@ export SHIPYARD_OPENAI_KEY=...   # or SHIPYARD_XAI_KEY for Grok
 shipyard solve --repo owner/repo --issue 42 --provider openai --dry-run \
   --include-files path/to/affected/file.py
 
-# Then deliver for real (override the preset's model if you like)
+# Then deliver for real (override the preset's model if you like); a
+# live run needs a guardrail, so the repo allowlist goes along:
 shipyard solve --repo owner/repo --issue 42 --provider openai \
+  --repos owner/repo \
   --include-files path/to/affected/file.py
 ```
 
