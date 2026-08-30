@@ -64,6 +64,12 @@ type Options struct {
 	// committed, pushed, or opened.
 	DryRun bool
 
+	// Verbose logs the full AI conversation (prompt, response,
+	// thinking, diagnostics) per issue through Deps.Log, with the
+	// usual per-issue prefix (the --verbose flag, env SHIPYARD_VERBOSE).
+	// Off by default.
+	Verbose bool
+
 	// Repos is the repository allowlist (owner/repo entries, the
 	// --repos flag or SHIPYARD_REPOS). When non-empty, Run refuses to
 	// start unless the watched repo is in the list.
@@ -355,6 +361,7 @@ func (d *Deps) solveOne(ctx context.Context, o Options, issue *githubclient.Issu
 		IncludeFiles: o.IncludeFiles,
 		Image:        o.Image,
 		DryRun:       o.DryRun,
+		Verbose:      o.Verbose,
 	})
 }
 

@@ -295,7 +295,8 @@ Behavior notes:
 Useful flags: `--interval 5m` (default `1m`), `--live` / `--dry-run`
 (mode; dry-run is the default), `--repos`, `--labels` / `--label
 shipyard`, `--max-prs`, `--i-know-this-is-unguarded`, `--state-file`,
-`--base main`, `--git-url`, `--include-files`, `--image` —
+`--base main`, `--git-url`, `--include-files`, `--image`, `--verbose`
+—
 plus the same `--provider` / `--ai-endpoint` / `--ai-key` / `--ai-model`
 configuration as `solve` (the default `custom` provider needs no key,
 so a keyless local endpoint works out of the box).
@@ -393,6 +394,7 @@ Flags take precedence over environment variables.
 | `--include-files` | —                         | no       | Comma-separated repo files to embed in the prompt    |
 | `--git-url`       | —                         | no       | Git clone URL when no `--workdir` is given           |
 | `--dry-run`       | —                         | no       | `solve`: stop after applying the patch (no commit/push/PR); `listen`: dry-run mode — the default for `listen` |
+| `--verbose`       | `SHIPYARD_VERBOSE`        | no       | Log the full AI conversation (prompt sent, response, thinking/reasoning block, HTTP status, latency, `finish_reason`); off by default (see [Debugging the AI conversation](#debugging-the-ai-conversation)) |
 | `--live`          | `SHIPYARD_MODE`           | no       | `listen` only: commit, push, and open pull requests (the default for `listen` is dry-run; `solve` is always live by default) |
 | `--repos`         | `SHIPYARD_REPOS`          | no       | Comma-separated `owner/repo` allowlist (solve + listen; see [Safety](#safety)) |
 | `--labels`        | `SHIPYARD_LABELS`         | no       | Comma-separated label allowlist (solve + listen; on `listen` the repeatable `--label` is an equivalent flag) |
@@ -458,6 +460,38 @@ first choice's `message.content` is used as the response text. The response
 should contain a unified diff in a fenced code block; anything else is
 extracted best-effort and, if no diff is found, the run fails with a clear
 error.
+
+### Debugging the AI conversation
+
+`--verbose` (or `SHIPYARD_VERBOSE=1`) on `solve` and `listen` logs the
+entire AI conversation, so a weak or local model can be debugged from the
+log alone. Per AI call it adds: the model name and the full prompt sent,
+the full response content, the `reasoning_content`/thinking block when the
+endpoint returns one, and the call's HTTP status, latency, and
+`finish_reason` — a `length` finish is announced as
+*response truncated by token limit*, the most common local-model failure
+mode. It is off by default and changes nothing else: the raw-response temp
+file is still written, secret redaction still applies (no API keys in
+logs), and with `listen` the lines carry the usual per-issue prefix:
+
+```sh
+shipyard solve --repo owner/repo --issue 42 --verbose
+shipyard listen --repo owner/repo --verbose
+```
+
+```sh
+# what the verbose lines look like (listen output)
+issue #42: AI request: model qwen2.5:27b; prompt 18,342 bytes, 431 lines
+issue #42: AI request (prompt sent to the endpoint):
+issue #42: You are an autonomous engineer solving a GitHub issue in this repository.
+issue #42: AI response: HTTP 200 in 41.7s; finish_reason: length — response truncated by token limit
+issue #42: AI response (content):
+issue #42: Here is an attempt: I would first …
+```
+
+Extremely long prompts and responses (over 256 KiB) are rendered as their
+size plus their first and last lines, with the omission announced in the
+log — never truncated silently.
 
 ## End-to-end test runs
 

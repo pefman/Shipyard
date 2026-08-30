@@ -93,6 +93,10 @@ Solve flags:
   --image <image>        Sandbox image for the fix step (live runs only; default:
                          auto-detected from the repository — see the README)
   --dry-run              Stop after applying the patch: no commit, push, or PR
+  --verbose              Log the full AI conversation: the prompt sent, the
+                         response, the thinking/reasoning block when the
+                         endpoint returns one, and HTTP status, latency, and
+                         finish_reason (env SHIPYARD_VERBOSE=1). Off by default
 
 Guardrails (solve and listen):
   --repos <list>         Comma-separated repository allowlist, owner/repo entries
@@ -139,6 +143,10 @@ Listen flags:
   --dry-run              Dry-run mode (the default for listen): apply patches
                          but commit nothing and open no pull requests. Takes
                          precedence over SHIPYARD_MODE; conflicts with --live
+  --verbose              Log the full AI conversation per issue (prompt sent,
+                         response, thinking/reasoning, HTTP status, latency,
+                         finish_reason), prefixed like all output (env
+                         SHIPYARD_VERBOSE=1). Off by default
 
 Login flags:
   --github-client-id <id> GitHub OAuth App client ID (env SHIPYARD_GITHUB_CLIENT_ID;
@@ -177,6 +185,7 @@ func runSolve(args []string) error {
 	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
 	gitURL := fs.String("git-url", "", "git clone URL (with --workdir unset)")
 	dryRun := fs.Bool("dry-run", false, "stop after applying the patch: no commit, push, or PR")
+	verbose := fs.Bool("verbose", verboseFromEnv(), "log the full AI conversation: prompt, response, thinking, diagnostics (env SHIPYARD_VERBOSE=1)")
 	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
 	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
 	labels := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS)")
@@ -258,6 +267,7 @@ func runSolve(args []string) error {
 		IncludeFiles: files,
 		Image:        *image,
 		DryRun:       *dryRun,
+		Verbose:      *verbose,
 	})
 	if err != nil {
 		return err
@@ -299,7 +309,20 @@ const (
 	envRepos  = "SHIPYARD_REPOS"
 	envLabels = "SHIPYARD_LABELS"
 	envMaxPRs = "SHIPYARD_MAX_PRS"
+	envVerbose = "SHIPYARD_VERBOSE"
 )
+
+// verboseFromEnv reports whether SHIPYARD_VERBOSE asks for the full AI
+// conversation to be logged (1/true/yes/on; anything else is off). It
+// only seeds the --verbose flag's default, so an explicit
+// --verbose[=false] on the command line wins.
+func verboseFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envVerbose))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 // applyGuardrails resolves the allowlists and the pull-request budget
 // (flag wins over environment), refuses a live run that is unguarded —

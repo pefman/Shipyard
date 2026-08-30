@@ -4,6 +4,19 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-46)
+
+- `--verbose` (on both `solve` and `listen`, env `SHIPYARD_VERBOSE=1`):
+  log the full AI conversation, so a weak or local model can be debugged
+  from the log alone. Per AI call: the model name and the full prompt
+  sent, the full response content, the `reasoning_content`/thinking block
+  when the endpoint returns one, and the call's HTTP status, latency, and
+  `finish_reason` — a `length` finish is announced explicitly as
+  *response truncated by token limit*. Off by default (no behavior change
+  when off); secret redaction still applies; extremely long content (over
+  256 KiB) is rendered as size plus first/last lines, omission announced,
+  never silent.
+
 ### Added (SHI-44)
 
 - `--all` (on both `solve` and `listen`): "no allowlist on this axis,
