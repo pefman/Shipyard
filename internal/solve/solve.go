@@ -97,6 +97,14 @@ type Options struct {
 	// DryRun stops after the patch has been applied to the workdir:
 	// nothing is committed, pushed, or opened.
 	DryRun bool
+
+	// Verbose logs the full AI conversation through Deps.Log: the
+	// prompt sent, the response, the thinking/reasoning block when the
+	// endpoint returns one, and the call's HTTP status, latency, and
+	// finish_reason (the --verbose flag, env SHIPYARD_VERBOSE). Off by
+	// default: with it off the log output is exactly what it is
+	// without.
+	Verbose bool
 }
 
 // Deps are the collaborators Solve needs.

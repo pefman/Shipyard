@@ -136,6 +136,40 @@ func TestPrepareListenUnguardedLiveRefused(t *testing.T) {
 	}
 }
 
+// TestPrepareListenVerbose: --verbose (or SHIPYARD_VERBOSE) lands in
+// listen.Options; off by default, and an explicit --verbose=false beats
+// the environment, flag-over-env like the other settings.
+func TestPrepareListenVerbose(t *testing.T) {
+	resetGuardrailEnv(t)
+	t.Setenv("SHIPYARD_VERBOSE", "")
+
+	run, err := prepareListen([]string{"--repo", "towner/trepo"})
+	if err != nil {
+		t.Fatalf("prepareListen: %v", err)
+	}
+	if run.Options.Verbose {
+		t.Error("Options.Verbose = true, want verbose off by default")
+	}
+
+	t.Setenv("SHIPYARD_VERBOSE", "1")
+	run, err = prepareListen([]string{"--repo", "towner/trepo"})
+	if err != nil {
+		t.Fatalf("prepareListen with SHIPYARD_VERBOSE=1: %v", err)
+	}
+	if !run.Options.Verbose {
+		t.Error("SHIPYARD_VERBOSE=1 must land in the loop as verbose on")
+	}
+
+	// An explicit flag wins over the environment.
+	run, err = prepareListen([]string{"--repo", "towner/trepo", "--verbose=false"})
+	if err != nil {
+		t.Fatalf("prepareListen with --verbose=false over env: %v", err)
+	}
+	if run.Options.Verbose {
+		t.Error("an explicit --verbose=false must beat SHIPYARD_VERBOSE=1")
+	}
+}
+
 // TestPrepareListenExplicitAll: --all starts a live run with no
 // allowlist (the run is deliberately unguarded, on purpose), and it is
 // a configuration error combined with any allowlist source: --repos,

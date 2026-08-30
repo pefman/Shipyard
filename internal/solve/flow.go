@@ -108,10 +108,24 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 
 	// --- AI call ----------------------------------------------------
 	log("calling AI endpoint ...")
-	response, err := d.AI.Complete(ctx, prompt)
+	if o.Verbose {
+		// Full conversation for debugging weak or local models from the
+		// log alone: everything sent and everything received. URLs with
+		// embedded credentials stay redacted, as everywhere else.
+		for _, line := range d.AI.VerboseRequestLines(prompt) {
+			log("%s", RedactCredentials(line))
+		}
+	}
+	completion, err := d.AI.Complete(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("calling AI endpoint: %w", err)
 	}
+	if o.Verbose {
+		for _, line := range d.AI.VerboseCompletionLines(completion) {
+			log("%s", RedactCredentials(line))
+		}
+	}
+	response := completion.Content
 	responsePath, err := saveToTemp(d.TempDir, "shipyard-response", ".txt", response)
 	if err != nil {
 		return nil, err
