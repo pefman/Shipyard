@@ -3,6 +3,7 @@ package listen
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/guardrails"
 	"github.com/pefman/Shipyard/internal/solve"
 )
 
@@ -279,6 +281,25 @@ func TestRunOnceLabelFilter(t *testing.T) {
 	gh.mu.Unlock()
 }
 
+// TestRunOnceLabelFilterCaseInsensitive: the loop's label filter uses
+// the shared guardrails matching, so a case-different entry behaves
+// like on solve: --labels BUG matches an issue labelled "bug".
+func TestRunOnceLabelFilterCaseInsensitive(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+
+	out, err := d.RunOnce(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Labels: []string{"BUG"},
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if out.Seen != 1 || out.New != 1 {
+		t.Errorf("outcome = %+v, want Seen=1 New=1 (bug matched case-insensitively)", out)
+	}
+}
+
 // TestRunOnceSeedsStateFromExistingPR: a lost state file must not make
 // the listener re-solve an issue that already has a pull request on
 // its fix branch.
@@ -380,6 +401,7 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 			Owner: "towner", Repo: "trepo",
 			StateFile: filepath.Join(dir, "state.json"),
 			Interval:  10 * time.Millisecond,
+			Unguarded: true, // guardrails are not under test here
 		})
 	}()
 
@@ -413,6 +435,153 @@ func TestRunOnceCorruptStateFileFails(t *testing.T) {
 	}
 	if _, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: path}); err == nil {
 		t.Fatal("RunOnce: expected an error for a corrupt state file")
+	}
+}
+
+// TestRunRefusesUnguarded: with neither a repo nor a label allowlist
+// set, a run that has not been acknowledged with
+// --i-know-this-is-unguarded is refused before it does any work.
+func TestRunRefusesUnguarded(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+	err := d.Run(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json")})
+	if !errors.Is(err, guardrails.ErrUnguarded) {
+		t.Fatalf("Run = %v, want the unguarded refusal", err)
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 0 {
+		t.Errorf("%d pull request(s) created by a refused run, want 0", n)
+	}
+	gh.mu.Unlock()
+}
+
+// TestRunUnguardedWithFlagProceeds: the same configuration with the
+// explicit acknowledgment passes the guard and runs.
+func TestRunUnguardedWithFlagProceeds(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+	// MaxPRs 1 so the run stops on its own once it has proved it ran.
+	err := d.Run(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Unguarded: true,
+		MaxPRs:    1,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 1 {
+		t.Errorf("%d pull request(s) created, want 1", n)
+	}
+	gh.mu.Unlock()
+}
+
+// TestRunRefusesRepoNotInAllowlist: a listener pointed at a repo that
+// is not on the repo allowlist starts nothing.
+func TestRunRefusesRepoNotInAllowlist(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+	err := d.Run(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Repos: []string{"other/repo"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not in the repo allowlist") {
+		t.Fatalf("Run = %v, want a repo-allowlist refusal", err)
+	}
+}
+
+// TestRunStopsAtPRCap: once the run's pull-request budget is spent,
+// the listener stops the run — a clean exit, not an error — with one
+// pull request opened and the rest of the issues left for a later run.
+func TestRunStopsAtPRCap(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+	err := d.Run(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		MaxPRs:    1,
+		Unguarded: true,
+	})
+	if err != nil {
+		t.Fatalf("Run = %v, want a clean exit at the pull-request cap", err)
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 1 {
+		t.Errorf("%d pull request(s) opened, want exactly 1 (the cap)", n)
+	}
+	gh.mu.Unlock()
+}
+
+// TestRunOncePRCap: a RunOnce pass handed a cap stops mid-pass once
+// the budget is spent; the issues it skipped are not marked processed.
+func TestRunOncePRCap(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	out, err := d.RunOnce(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: stateFile,
+		PRCap: guardrails.NewPRCap(1),
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !out.CapReached || out.PRsOpened != 1 || out.New != 1 {
+		t.Errorf("outcome = %+v, want CapReached with 1 PR after 1 issue", out)
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 1 {
+		t.Errorf("%d pull request(s) opened, want 1", n)
+	}
+	gh.mu.Unlock()
+
+	st, err := LoadState(stateFile)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if _, ok := st.IsProcessed(13); ok {
+		t.Error("an issue skipped at the cap must not be marked processed")
+	}
+}
+
+// TestRunOncePRCapZero: a run whose budget is zero solves nothing and
+// opens nothing, and reports the cap reached.
+func TestRunOncePRCapZero(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+
+	out, err := d.RunOnce(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		PRCap: guardrails.NewPRCap(0),
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !out.CapReached || out.New != 0 || out.PRsOpened != 0 {
+		t.Errorf("outcome = %+v, want CapReached with nothing solved", out)
+	}
+	gh.mu.Lock()
+	if n := len(gh.createdPRs); n != 0 {
+		t.Errorf("%d pull request(s) opened under a zero cap, want 0", n)
+	}
+	gh.mu.Unlock()
+}
+
+// TestRunOnceDryRunIgnoresPRCap: dry runs open no pull requests, so
+// the cap never trips and every issue is processed.
+func TestRunOnceDryRunIgnoresPRCap(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+
+	out, err := d.RunOnce(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		DryRun: true,
+		PRCap:  guardrails.NewPRCap(1),
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if out.New != 3 || out.PRsOpened != 0 || out.CapReached {
+		t.Errorf("outcome = %+v, want all 3 dry-run-solved with no cap", out)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/guardrails"
 	"github.com/pefman/Shipyard/internal/sandbox"
 	"github.com/pefman/Shipyard/internal/solve"
 )
@@ -38,7 +39,9 @@ type Options struct {
 	Interval time.Duration
 
 	// Labels restricts a pass to issues carrying at least one of these
-	// labels (e.g. "shipyard"). Empty means every open issue.
+	// labels (e.g. "shipyard"). Empty means every open issue. Matching
+	// is case-insensitive, the shared guardrails rule, so solve and
+	// listen agree on what an allowed label means.
 	Labels []string
 
 	// Base is the branch fixes are based on, passed through to the
@@ -60,6 +63,27 @@ type Options struct {
 	// DryRun stops each solve after the patch is applied: nothing is
 	// committed, pushed, or opened.
 	DryRun bool
+
+	// Repos is the repository allowlist (owner/repo entries, the
+	// --repos flag or SHIPYARD_REPOS). When non-empty, Run refuses to
+	// start unless the watched repo is in the list.
+	Repos []string
+
+	// MaxPRs is the per-run budget of pull requests to open
+	// (--max-prs / SHIPYARD_MAX_PRS). A value of zero or less selects
+	// guardrails.DefaultMaxPRs; a run that may open no pull requests
+	// at all installs guardrails.NewPRCap(0) on PRCap instead.
+	MaxPRs int
+
+	// Unguarded reports that the operator acknowledged an unguarded
+	// run (--i-know-this-is-unguarded): with no repo or label
+	// allowlist set, Run is refused unless this is true.
+	Unguarded bool
+
+	// PRCap tracks how many pull requests this run has opened; Run
+	// installs one from MaxPRs before the first pass. When nil,
+	// RunOnce applies no cap (for direct API use).
+	PRCap *guardrails.PRCap
 }
 
 // Deps are the collaborators listen needs.
@@ -93,6 +117,13 @@ type PassOutcome struct {
 	// Failed is the number of issues the solving flow rejected; they
 	// are retried on a later pass.
 	Failed int
+	// PRsOpened is how many pull requests this pass opened (always
+	// zero for dry runs).
+	PRsOpened int
+	// CapReached is true when the run's pull-request cap
+	// (Options.PRCap) was reached during the pass: the pass stopped
+	// and Run exits cleanly without picking up further issues.
+	CapReached bool
 }
 
 // RunOnce performs a single poll pass: list the open issues, skip the
@@ -113,10 +144,18 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 	}
 
 	log := d.log()
+	// The label filter is the label allowlist itself; matching is the
+	// shared, case-insensitive guardrails rule so solve and listen
+	// agree on what an allowed label means.
+	labelAllow, err := guardrails.NewAllow(nil, o.Labels)
+	if err != nil {
+		return nil, err
+	}
 	state, err := LoadState(stateFile(o.StateFile))
 	if err != nil {
 		return nil, err
 	}
+	cap := o.PRCap
 	issues, err := d.GitHub.ListIssues(ctx, o.Owner, o.Repo, "open")
 	if err != nil {
 		return nil, fmt.Errorf("listing open issues in %s/%s: %w", o.Owner, o.Repo, err)
@@ -127,7 +166,12 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 		if ctx.Err() != nil {
 			break // shutting down: stop picking up further issues
 		}
-		if !matchesLabels(issue.Labels, o.Labels) {
+		if cap != nil && !cap.CanOpen() {
+			out.CapReached = true
+			log("pull request cap reached (%d of %d): no more issues are picked up this pass", cap.Count(), cap.Max())
+			break
+		}
+		if !labelAllow.LabelsAllowed(issue.Labels) {
 			continue
 		}
 		out.Seen++
@@ -160,6 +204,10 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 			continue
 		}
 		if res.PR != nil {
+			out.PRsOpened++
+			if cap != nil {
+				cap.Opened()
+			}
 			state.Remember(issue.Number, res.PR.HTMLURL)
 			log("issue #%d: pull request opened: %s", issue.Number, res.PR.HTMLURL)
 		} else {
@@ -167,6 +215,10 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 			log("issue #%d: dry run, patch saved to %s", issue.Number, res.PatchPath)
 		}
 		d.saveState(o, state, log)
+		if cap != nil && cap.Exhausted() {
+			out.CapReached = true
+			break
+		}
 	}
 	return out, nil
 }
@@ -187,8 +239,27 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 		o.Interval = DefaultInterval
 	}
 
+	// Guardrails: a run with no repo or label allowlist is refused
+	// unless the operator acknowledged it, and the watched repo must
+	// be on the repo allowlist when one is set.
+	allow, err := guardrails.NewAllow(o.Repos, o.Labels)
+	if err != nil {
+		return err
+	}
+	if err := allow.Gate(o.Unguarded); err != nil {
+		return err
+	}
+	if len(o.Repos) > 0 && !allow.RepoAllowed(o.Owner, o.Repo) {
+		return fmt.Errorf("repo %s/%s is not in the repo allowlist (%s): this listener would never solve anything here — point --repo at an allowed repository or remove it from --repos", o.Owner, o.Repo, strings.Join(o.Repos, ", "))
+	}
+
 	log := d.log()
-	log("listening on %s/%s: every %s, state in %s", o.Owner, o.Repo, o.Interval, stateFile(o.StateFile))
+	if allow.Configured() {
+		log("guardrails: %s", allow.Summary())
+	} else {
+		log("WARNING: no repo or label allowlist is set — this run is UNGUARDED (acknowledged with --i-know-this-is-unguarded) and may act on any issue in %s/%s", o.Owner, o.Repo)
+	}
+	log("listening on %s/%s: every %s, state in %s, max %d pull request(s) per run", o.Owner, o.Repo, o.Interval, stateFile(o.StateFile), maxPRsForRun(o.MaxPRs))
 	if len(o.Labels) > 0 {
 		log("label filter: %s", strings.Join(o.Labels, ", "))
 	}
@@ -208,10 +279,21 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 		}
 	}
 
+	// The per-run pull-request budget. Options.MaxPRs <= 0 selects the
+	// default (a zero value from a direct API call must not mean
+	// "open nothing"); an explicit zero cap is still available via a
+	// PRCap installed on Options.PRCap.
+	cap := guardrails.NewPRCap(maxPRsForRun(o.MaxPRs))
+	o.PRCap = cap
+
 	ticker := time.NewTicker(o.Interval)
 	defer ticker.Stop()
 	for {
 		out, err := d.RunOnce(ctx, o)
+		if out != nil && out.CapReached {
+			log("run stopped: pull request cap reached (%d of %d opened this run) — remaining issues stay open for the next run", cap.Count(), cap.Max())
+			return nil
+		}
 		if err != nil && ctx.Err() == nil {
 			log("pass failed: %v (retrying in %s)", err, o.Interval)
 		} else if out != nil && err == nil {
@@ -304,26 +386,18 @@ func (d *Deps) saveState(o Options, state *State, log func(format string, args .
 	}
 }
 
-// matchesLabels reports whether the issue matches the filter: every
-// label in wanted must... no — the issue matches when it carries at
-// least one of wanted; an empty filter matches everything.
-func matchesLabels(issueLabels, wanted []string) bool {
-	if len(wanted) == 0 {
-		return true
-	}
-	for _, have := range issueLabels {
-		for _, want := range wanted {
-			if have == want {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func orNone(s string) string {
 	if s == "" {
 		return "no pull request (dry run)"
 	}
 	return s
+}
+
+// maxPRsForRun maps the configured budget to a concrete cap: a value
+// of zero or less selects guardrails.DefaultMaxPRs.
+func maxPRsForRun(maxPRs int) int {
+	if maxPRs <= 0 {
+		return guardrails.DefaultMaxPRs
+	}
+	return maxPRs
 }
