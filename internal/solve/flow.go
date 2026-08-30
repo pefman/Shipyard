@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/sandbox"
 )
 
 // Solve runs the core solving flow: issue → AI → patch → PR.
@@ -18,7 +19,10 @@ import (
 //  3. build the prompt (issue + labels + file tree + included files)
 //  4. call the AI endpoint
 //  5. extract the unified diff (error: no usable changes)
-//  6. apply it to the checkout (error: patch does not apply)
+//  6. run the fix step — apply the patch, then build and test it:
+//     in a disposable sandbox container on live runs (never on the
+//     host), natively when --dry-run or Docker is unavailable (error:
+//     patch does not apply / a verification step fails)
 //  7. stop if Options.DryRun
 //  8. commit on a new branch, push
 //  9. open a pull request that links the source issue
@@ -34,6 +38,12 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	}
 	if d.Git == nil {
 		d.Git = ExecGit
+	}
+	if d.DockerOK == nil {
+		d.DockerOK = sandbox.DockerAvailable
+	}
+	if d.RunInSandbox == nil {
+		d.RunInSandbox = sandbox.Run
 	}
 	if d.Log == nil {
 		d.Log = func(format string, args ...any) { fmt.Fprintf(os.Stderr, "shipyard: "+format+"\n", args...) }
@@ -70,6 +80,21 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	}
 	log("working on branch %s (base %s)", branch, base)
 
+	// --- sandbox decision ---------------------------------------------
+	// Live runs execute the fix step in a disposable container; the AI
+	// must know that environment before it writes the fix, so this
+	// happens before the prompt is built.
+	sandboxImage := ""
+	if o.DryRun {
+		log("sandbox: off (dry-run)")
+	} else if d.DockerOK(ctx) {
+		img, source := sandbox.ResolveImageWithSource(o.Image, workdir)
+		sandboxImage = img
+		log("sandbox: %s (source: %s)", sandboxImage, source)
+	} else {
+		log("sandbox: off (Docker not available: the fix step runs natively on the host)")
+	}
+
 	// --- prompt -----------------------------------------------------
 	tree, err := git.Run(ctx, workdir, "ls-files")
 	if err != nil {
@@ -79,7 +104,7 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	prompt := BuildPrompt(repo, issue, base, tree, fileContents)
+	prompt := BuildPrompt(repo, issue, base, tree, fileContents, sandboxImage)
 
 	// --- AI call ----------------------------------------------------
 	log("calling AI endpoint ...")
@@ -104,16 +129,43 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	}
 	log("extracted patch saved to %s", patchPath)
 
-	// --- apply ------------------------------------------------------
-	if err := ApplyPatch(ctx, git, workdir, patch, patchPath); err != nil {
-		return nil, err
+	// --- fix step -------------------------------------------------
+	// Apply the patch, then build and test it: in the sandbox on live
+	// runs, natively otherwise (dry runs, no Docker available).
+	if sandboxImage != "" {
+		commands := append([]string{ApplyPatchCommand(patch)}, sandbox.FixCommands(sandboxImage)...)
+		run, err := d.RunInSandbox(ctx, sandbox.RunSpec{
+			Image:    sandboxImage,
+			Workdir:  workdir,
+			Commands: commands,
+			Log:      log,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fix step in sandbox: %w", err)
+		}
+		if !run.OK {
+			for i, s := range run.Steps {
+				if !s.Ran {
+					return nil, fmt.Errorf("fix step failed in sandbox: step %d of %d (%q) did not run — no commit, push, or PR was made", i+1, len(run.Steps), s.Command)
+				}
+				if s.ExitCode != 0 {
+					return nil, fmt.Errorf("fix step failed in sandbox: step %d of %d (%q) exited %d — no commit, push, or PR was made", i+1, len(run.Steps), s.Command, s.ExitCode)
+				}
+			}
+		}
+		log("fix step passed in %s: patch applied to %s", sandboxImage, workdir)
+	} else {
+		if err := ApplyPatch(ctx, git, workdir, patch, patchPath); err != nil {
+			return nil, err
+		}
+		log("patch applied to %s", workdir)
 	}
-	log("patch applied to %s", workdir)
 
 	res := &Result{
 		Workdir:      workdir,
 		Base:         base,
 		Branch:       branch,
+		Sandbox:      sandboxImage,
 		Explanation:  explanation,
 		Patch:        patch,
 		PatchPath:    patchPath,

@@ -184,7 +184,11 @@ func TestListenE2E(t *testing.T) {
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
 		AI:     ai,
 		Git:    solve.ExecGit,
-		Log:    func(format string, args ...any) {},
+		// Native fix-step path: the end-to-end tests must not depend
+		// on a Docker daemon (the sandbox wiring is covered by
+		// solve_sandbox_e2e_test.go with a stub docker binary).
+		DockerOK: func(context.Context) bool { return false },
+		Log:      func(format string, args ...any) {},
 	}
 
 	out, err := d.RunOnce(context.Background(), Options{
@@ -226,10 +230,11 @@ func TestListenE2ESecondPassSkips(t *testing.T) {
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state.json")
 	d := Deps{
-		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
-		Git:    solve.ExecGit,
-		Log:    func(format string, args ...any) {},
+		GitHub:   githubclient.NewClient(gh.srv.URL, "gh-token"),
+		AI:       ai,
+		Git:      solve.ExecGit,
+		DockerOK: func(context.Context) bool { return false },
+		Log:      func(format string, args ...any) {},
 	}
 
 	if _, err := d.RunOnce(context.Background(), Options{Owner: "towner", Repo: "trepo", StateFile: stateFile}); err != nil {
@@ -256,10 +261,11 @@ func TestListenE2ERecoveryFromLostState(t *testing.T) {
 		[]githubclientPR{{issue: 9, number: 42, title: "Fix #9", state: "open", htmlURL: "https://github.com/towner/trepo/pull/42"}})
 	ai := newE2EAIClient(t)
 	d := Deps{
-		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
-		AI:     ai,
-		Git:    solve.ExecGit,
-		Log:    func(format string, args ...any) {},
+		GitHub:   githubclient.NewClient(gh.srv.URL, "gh-token"),
+		AI:       ai,
+		Git:      solve.ExecGit,
+		DockerOK: func(context.Context) bool { return false },
+		Log:      func(format string, args ...any) {},
 	}
 
 	// Fresh state file (lost state): the existing-PR check must seed

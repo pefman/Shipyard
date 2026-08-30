@@ -84,6 +84,14 @@ The listener keeps its state file in `/data` (override with
 re-solve issues. Use `--label` to only solve labeled issues and
 `--dry-run` to apply patches without committing or opening PRs.
 
+Note for live runs while Shipyard itself is in a container: the sandbox
+needs to start containers from inside (see [Sandbox](#sandbox)), so
+give the Shipyard container access to the Docker socket
+(`-v /var/run/docker.sock:/var/run/docker.sock`). Without it, live runs
+fall back to the native fix step, which then executes *inside the
+Shipyard container* — fine for most repos, but keep `--dry-run` in mind
+if the mounted checkout is precious.
+
 ## Command
 
 ### `shipyard login`
@@ -117,16 +125,20 @@ shipyard solve --repo owner/repo --issue 42
 
 Flow:
 
-1. Fetches repo info and issue details (title, body, labels) from the
-   GitHub API.
+1. Fetches repo info and issue details (title, body, labels) from
+   the GitHub API.
 2. Ensures a local checkout: `--workdir` if given (must be clean),
    otherwise a clone into a temp directory (the clone URL comes from the
    GitHub API and is authenticated with the GitHub token).
 3. Assembles a prompt from the issue plus repo context: the file tree and
-   the contents of any `--include-files`.
+   the contents of any `--include-files`. On live runs it also tells the
+   AI which sandbox image its fix will be built and tested in (see
+   [Sandbox](#sandbox)).
 4. Sends the prompt to the configured AI endpoint and extracts a unified
    diff from the response.
-5. Applies the diff to the checkout.
+5. Runs the fix step — applies the diff, then builds and tests it —
+   inside a disposable sandbox container on live runs, or natively with
+   `--dry-run` (see [Sandbox](#sandbox)).
 6. Commits on a new branch (`shipyard/issue-<n>` by default), pushes it,
    and opens a pull request via the GitHub API whose body links the source
    issue.
@@ -152,6 +164,8 @@ Shipyard fails fast with actionable errors for the expected failure modes:
 | 403 from the GitHub API (e.g. opening the PR) | `this token is missing the permissions GitHub needs here (…)` |
 | `--workdir` has uncommitted changes | `has uncommitted changes; commit or stash them first` |
 | Remote branch name already taken (previous run) | `remote branch … already exists; … pass --branch` |
+| A build/test step fails in the sandbox (live run) | `fix step failed in sandbox: step … — no commit, push, or PR was made` |
+| Docker not installed / daemon down (live run) | `sandbox: off (Docker not available: the fix step runs natively on the host)` |
 
 The raw AI response is saved to a temp file on every run, so a bad model
 answer is always inspectable.
@@ -195,10 +209,61 @@ Behavior notes:
   listener is easy to follow (`journalctl`, `docker logs`, …).
 
 Useful flags: `--interval 5m` (default `1m`), `--label shipyard`,
-`--base main`, `--git-url`, `--include-files`, `--dry-run` — plus the
-same `--provider` / `--ai-endpoint` / `--ai-key` / `--ai-model`
+`--base main`, `--git-url`, `--include-files`, `--image`, `--dry-run` —
+plus the same `--provider` / `--ai-endpoint` / `--ai-key` / `--ai-model`
 configuration as `solve` (the default `custom` provider needs no key,
 so a keyless local endpoint works out of the box).
+
+## Sandbox
+
+Live runs of `solve` and `listen` execute the *fix step* — applying the
+AI's patch, then building and testing the result — inside a disposable
+Docker container: the checkout is mounted read-write, the steps run in
+an ephemeral `docker run`, and the container is discarded when they
+finish. Everything else — cloning, the AI call, commit, push, opening
+the pull request — runs natively on the host, and `--dry-run` never
+touches Docker at all: it applies the patch natively and stops. So
+AI-generated code only ever executes inside the throwaway container,
+never on your machine.
+
+### Which image
+
+Resolution order:
+
+1. `--image <image>` — explicit override (both commands).
+2. The per-repository setting, once the planned `shipyard.yaml` lands
+   (the lookup point already exists; nothing to rewire).
+3. Auto-detection from the repository contents — first match wins:
+
+   | Marker file | Image | Verification steps run in it |
+   | ----------- | ----- | ---------------------------- |
+   | `go.mod` | `golang:1.22` | `go build -o /dev/null ./…` (no binary is written), `go test ./…` |
+   | `pyproject.toml` / `requirements.txt` | `python:3.12` | bytecode compile of all `.py` files |
+   | `package.json` | `node:20` | `npm install`, `npm test` (skipped when the package defines no test script) |
+   | `Cargo.toml` | `rust:1.79` | `cargo build`, `cargo test` |
+   | none of the above | `ubuntu:24.04` | the patch applies only (the image must provide `git`) |
+
+Unknown images (custom `--image` values) run the patch-apply step only.
+The image is announced to the AI in the prompt, so the generated code
+targets that toolchain. If a verification step fails, the run stops
+before commit, push, and pull request: a patch that does not build or
+test cleanly never opens a PR.
+
+### Docker requirement
+
+Docker (CLI plus a running daemon) is required **only for live runs**;
+`--dry-run` works with zero dependencies. A live run that cannot reach
+Docker falls back to the native fix step exactly as before. Every run
+prints an audit line up front:
+
+- `sandbox: <image> (source: flag|auto|config)` — live run, fix step
+  runs in the container;
+- `sandbox: off (Docker not available: …)` — live run, native fallback;
+- `sandbox: off (dry-run)` — dry run, nothing runs.
+
+In `listen` mode the per-issue line is prefixed like all other output
+(`issue #42: sandbox: …`), and the listener prints one summary line at
+startup.
 
 ## Configuration
 
@@ -345,7 +410,10 @@ go test ./...
 The `internal/solve` package includes end-to-end tests that run the whole
 flow (clone → prompt → mock AI → `git apply` → commit → push → mock PR
 creation) with real git against a local bare "remote", plus failure-mode
-tests for every error path above.
+tests for every error path above. The sandbox wiring is covered by
+end-to-end tests in `internal/listen` that stub the `docker` binary on
+PATH, so `go test` needs neither a Docker daemon nor a container
+runtime.
 
 ## Project layout
 
@@ -354,7 +422,8 @@ cmd/shipyard/          CLI entrypoint (solve and listen commands)
 internal/config/       config resolution: flags over env vars
 internal/githubclient  GitHub REST client (repo, issues, pull requests)
 internal/aiclient/     OpenAI-compatible chat completions client
-internal/solve/        the solving flow: prompt → AI → patch → PR
+internal/solve/        the solving flow: prompt → AI → patch → fix step → PR
+internal/sandbox/      ephemeral Docker execution of the fix step (live runs)
 internal/listen/       listen mode: poll open issues, solve new ones
 hack/mockai/           dev-only mock AI endpoint for local end-to-end runs
 Dockerfile             multi-stage image: static binary on Alpine, non-root

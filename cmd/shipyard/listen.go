@@ -41,6 +41,7 @@ func runListen(args []string) error {
 	base := fs.String("base", "", "base branch for fixes (default: the repo's default branch)")
 	gitURL := fs.String("git-url", "", "git clone URL for the per-issue checkout (default from the API)")
 	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
+	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
 	dryRun := fs.Bool("dry-run", false, "apply patches but commit nothing and open no pull requests")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -93,6 +94,7 @@ func runListen(args []string) error {
 		Base:         *base,
 		GitURL:       *gitURL,
 		IncludeFiles: files,
+		Image:        *image,
 		DryRun:       *dryRun,
 	}); err != nil {
 		return err
