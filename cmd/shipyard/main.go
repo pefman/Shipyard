@@ -75,6 +75,8 @@ Solve flags:
   --branch <name>        Branch for the fix (default: shipyard/issue-<n>)
   --include-files <list> Comma-separated files to embed in the prompt
   --git-url <url>        Git clone URL (with --workdir unset; default from the API)
+  --image <image>        Sandbox image for the fix step (live runs only; default:
+                         auto-detected from the repository — see the README)
   --dry-run              Stop after applying the patch: no commit, push, or PR
 
 Listen flags:
@@ -93,6 +95,8 @@ Listen flags:
   --base <branch>        Base branch (default: the repo's default branch)
   --git-url <url>        Git clone URL for the per-issue checkout
   --include-files <list> Comma-separated files to embed in the prompt
+  --image <image>        Sandbox image for the fix step (live runs only; default:
+                         auto-detected from the repository)
   --dry-run              Apply patches but commit nothing and open no pull requests
 
 Login flags:
@@ -123,6 +127,7 @@ func runSolve(args []string) error {
 	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
 	gitURL := fs.String("git-url", "", "git clone URL (with --workdir unset)")
 	dryRun := fs.Bool("dry-run", false, "stop after applying the patch: no commit, push, or PR")
+	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -170,6 +175,7 @@ func runSolve(args []string) error {
 		Base:         *base,
 		Branch:       *branch,
 		IncludeFiles: files,
+		Image:        *image,
 		DryRun:       *dryRun,
 	})
 	if err != nil {

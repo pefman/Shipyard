@@ -4,6 +4,29 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-33)
+
+- `solve` and `listen` now run the fix step — applying the AI's patch,
+  then building and testing it — inside a disposable Docker container
+  on live runs: AI-generated code no longer executes on the host. The
+  rest of the flow (clone, AI call, commit, push, PR) stays native, and
+  `--dry-run` never touches Docker. A live run without Docker available
+  falls back to the native path, exactly as before.
+- New `--image <image>` flag on `solve` and `listen` to pick the sandbox
+  image. Default: auto-detection from the repository contents
+  (`go.mod` → `golang:1.22`, `pyproject.toml`/`requirements.txt` →
+  `python:3.12`, `package.json` → `node:20`, `Cargo.toml` → `rust:1.79`,
+  otherwise `ubuntu:24.04` with patch-apply only). The per-repo setting
+  will slot in here when `shipyard.yaml` lands — no rework needed.
+- The AI prompt now names the image the fix will be built and tested in
+  (live runs), so generated code targets that toolchain.
+- Every run prints an audit line: `sandbox: <image> (source:
+  flag|auto|config)` (live, sandboxed), `sandbox: off (Docker not
+  available: …)` (live, native fallback), or `sandbox: off (dry-run)`.
+- A failed build/test step in the sandbox stops the run before commit,
+  push, and pull request: a patch that does not pass verification never
+  opens a PR.
+
 ### Added (SHI-30)
 
 - `--repo` (on `solve` and `listen`) now accepts every common GitHub

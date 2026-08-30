@@ -179,6 +179,20 @@ func ApplyPatch(ctx context.Context, git GitRunner, dir, patch, patchPath string
 	return nil
 }
 
+// patchEOF terminates the here-document ApplyPatchCommand feeds to git
+// apply inside a sandbox container. A patch containing that exact line
+// as a standalone line would break the here-document; it is under
+// Shipyard's control and never appears in generated diffs in practice.
+const patchEOF = "__SHIPYARD_PATCH_EOF__"
+
+// ApplyPatchCommand renders one shell command line that applies patch
+// to the sandbox container's checkout (git apply reading a here-document
+// from stdin), so the generated code is never executed on the host.
+func ApplyPatchCommand(patch string) string {
+	return "git apply --whitespace=nowarn <<'" + patchEOF + "'\n" +
+		strings.TrimRight(patch, "\n") + "\n" + patchEOF + "\n"
+}
+
 // CloneURLWithToken embeds the GitHub token in an https clone URL so the
 // git CLI can authenticate. Other URL schemes (ssh, file://) are passed
 // through unchanged; git's own credentials handling applies there.

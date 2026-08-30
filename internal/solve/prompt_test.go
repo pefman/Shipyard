@@ -17,7 +17,7 @@ func TestBuildPrompt(t *testing.T) {
 	}
 	p := BuildPrompt(repo, issue, "main", "src/login.go\nsrc/main.go", map[string]string{
 		"src/login.go": "func Login() {}",
-	})
+	}, "")
 
 	for _, want := range []string{
 		"owner/repo",
@@ -39,9 +39,24 @@ func TestBuildPrompt(t *testing.T) {
 func TestBuildPromptEmptyOptionalParts(t *testing.T) {
 	repo := &githubclient.Repo{FullName: "owner/repo"}
 	issue := &githubclient.Issue{Number: 1, Title: "t"}
-	p := BuildPrompt(repo, issue, "", "", nil)
+	p := BuildPrompt(repo, issue, "", "", nil, "")
 	if strings.Contains(p, "Labels:") || strings.Contains(p, "Issue body:") || strings.Contains(p, "Base branch:") {
 		t.Errorf("empty optional parts should be omitted:\n%s", p)
+	}
+	if strings.Contains(p, "disposable container") {
+		t.Errorf("no sandbox line without a sandbox image:\n%s", p)
+	}
+}
+
+// TestBuildPromptSandboxLine: a live run tells the AI which image its
+// fix will be built and tested in, so generated code targets that
+// toolchain; without one the line must not appear.
+func TestBuildPromptSandboxLine(t *testing.T) {
+	repo := &githubclient.Repo{FullName: "owner/repo"}
+	issue := &githubclient.Issue{Number: 1, Title: "t"}
+	p := BuildPrompt(repo, issue, "main", "", nil, "golang:1.22")
+	if !strings.Contains(p, "disposable container running the golang:1.22 image") {
+		t.Errorf("prompt missing the sandbox environment line:\n%s", p)
 	}
 }
 

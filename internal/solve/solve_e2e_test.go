@@ -187,7 +187,12 @@ func newDeps(gh *fakeGitHub, ai *aiclient.Client, t *testing.T) Deps {
 	return Deps{
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
 		AI:     ai,
-		Log:    func(format string, args ...any) {}, // keep test output quiet
+		// Force the native fix-step path: these end-to-end tests must
+		// not depend on a Docker daemon being present or not (the
+		// sandbox wiring is covered in internal/listen with a stub
+		// docker binary).
+		DockerOK: func(context.Context) bool { return false },
+		Log:      func(format string, args ...any) {}, // keep test output quiet
 	}
 }
 

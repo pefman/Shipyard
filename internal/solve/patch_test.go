@@ -112,6 +112,26 @@ func TestExtractPatchNoUsableChanges(t *testing.T) {
 	}
 }
 
+func TestApplyPatchCommand(t *testing.T) {
+	patch := "diff --git a/hello.py b/hello.py\n--- a/hello.py\n+++ b/hello.py\n@@ -1 +1 @@\n-old\n+new\n"
+	cmd := ApplyPatchCommand(patch)
+	if !strings.HasPrefix(cmd, "git apply --whitespace=nowarn <<'"+patchEOF+"'\n") {
+		t.Errorf("command does not start with the here-document opener:\n%q", cmd)
+	}
+	if !strings.Contains(cmd, "-old\n+new\n") {
+		t.Errorf("patch body mangled:\n%q", cmd)
+	}
+	if !strings.HasSuffix(cmd, "\n"+patchEOF+"\n") {
+		t.Errorf("command does not end with the here-document terminator:\n%q", cmd)
+	}
+	// A patch without a trailing newline must still be separated from
+	// the terminator by its own line.
+	cmd = ApplyPatchCommand("x\n+new")
+	if !strings.HasSuffix(cmd, "\n+new\n"+patchEOF+"\n") {
+		t.Errorf("missing line break before the terminator:\n%q", cmd)
+	}
+}
+
 func TestCloneURLWithToken(t *testing.T) {
 	tests := []struct {
 		name, url, token, want string

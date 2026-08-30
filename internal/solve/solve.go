@@ -17,6 +17,7 @@ import (
 
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/sandbox"
 )
 
 // GitRunner runs git commands. It exists so tests can fake git.
@@ -88,6 +89,11 @@ type Options struct {
 	// embedded in the prompt, so the AI sees the code it is patching.
 	IncludeFiles []string
 
+	// Image names the sandbox image the fix step runs in on a live run
+	// (the --image flag). Empty: resolve it from the repository (the
+	// per-repo setting, once it lands, then auto-detection).
+	Image string
+
 	// DryRun stops after the patch has been applied to the workdir:
 	// nothing is committed, pushed, or opened.
 	DryRun bool
@@ -101,6 +107,13 @@ type Deps struct {
 	AI *aiclient.Client
 	// Git runs git commands; nil uses ExecGit.
 	Git GitRunner
+	// DockerOK reports whether the fix step can run in a sandbox
+	// (docker CLI on PATH, daemon answering); nil uses
+	// sandbox.DockerAvailable.
+	DockerOK func(ctx context.Context) bool
+	// RunInSandbox executes the fix-step commands in an ephemeral
+	// container; nil uses sandbox.Run.
+	RunInSandbox func(ctx context.Context, spec sandbox.RunSpec) (*sandbox.RunResult, error)
 	// TempDir is the directory for clones and scratch patch files;
 	// "" uses os.TempDir().
 	TempDir string
@@ -125,4 +138,7 @@ type Result struct {
 	ResponsePath string
 	// PR is the opened pull request (nil for --dry-run).
 	PR *githubclient.PR
+	// Sandbox is the image the fix step ran in; empty when the fix
+	// step ran natively (dry runs, or Docker was not available).
+	Sandbox string
 }

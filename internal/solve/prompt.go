@@ -15,8 +15,10 @@ const (
 
 // BuildPrompt assembles the prompt sent to the AI endpoint: the issue
 // (title, body, labels) plus the repository context (file tree and the
-// contents of explicitly included files) and the response contract.
-func BuildPrompt(repo *githubclient.Repo, issue *githubclient.Issue, baseBranch, fileTree string, fileContents map[string]string) string {
+// contents of explicitly included files), the environment the fix will
+// be verified in (the sandbox image, on live runs), and the response
+// contract.
+func BuildPrompt(repo *githubclient.Repo, issue *githubclient.Issue, baseBranch, fileTree string, fileContents map[string]string, sandboxImage string) string {
 	var b strings.Builder
 	b.WriteString("You are an autonomous engineer solving a GitHub issue in this repository.\n\n")
 	fmt.Fprintf(&b, "Repository: %s\n", repo.FullName)
@@ -36,6 +38,9 @@ func BuildPrompt(repo *githubclient.Repo, issue *githubclient.Issue, baseBranch,
 	}
 	for _, path := range sortedKeys(fileContents) {
 		fmt.Fprintf(&b, "\nFile: %s\n```\n%s\n```\n", path, fileContents[path])
+	}
+	if sandboxImage != "" {
+		fmt.Fprintf(&b, "\nEnvironment: your fix will be built and tested in a disposable container running the %s image; write code and any commands for that toolchain.\n", sandboxImage)
 	}
 	b.WriteString(`
 Your response:

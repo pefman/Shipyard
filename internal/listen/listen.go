@@ -16,6 +16,7 @@ import (
 
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/sandbox"
 	"github.com/pefman/Shipyard/internal/solve"
 )
 
@@ -52,6 +53,10 @@ type Options struct {
 	// IncludeFiles are repo-relative files embedded in every prompt.
 	IncludeFiles []string
 
+	// Image names the sandbox image the fix step runs in (live runs
+	// only; the --image flag). Empty: auto-detect from the repository.
+	Image string
+
 	// DryRun stops each solve after the patch is applied: nothing is
 	// committed, pushed, or opened.
 	DryRun bool
@@ -65,6 +70,12 @@ type Deps struct {
 	AI *aiclient.Client
 	// Git runs git commands; nil uses solve.ExecGit.
 	Git solve.GitRunner
+	// DockerOK reports whether the fix step can run in a sandbox;
+	// nil uses sandbox.DockerAvailable.
+	DockerOK func(ctx context.Context) bool
+	// RunInSandbox executes the fix step in an ephemeral container;
+	// nil uses sandbox.Run.
+	RunInSandbox func(ctx context.Context, spec sandbox.RunSpec) (*sandbox.RunResult, error)
 	// Log receives per-run and per-issue progress output; nil logs to
 	// stderr.
 	Log func(format string, args ...any)
@@ -183,6 +194,18 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 	}
 	if o.DryRun {
 		log("dry run: patches are applied but nothing is committed, pushed, or opened")
+		log("sandbox: off (dry-run)")
+	} else {
+		// Startup audit line: whether live fix steps run in a sandbox.
+		// The exact image is auto-detected per checkout, so it is
+		// reported per issue by the solving flow.
+		if !d.dockerOK()(ctx) {
+			log("sandbox: off (Docker not available: the fix step runs natively on the host)")
+		} else if o.Image != "" {
+			log("sandbox: %s (source: flag)", o.Image)
+		} else {
+			log("sandbox: on (image: auto-detected per repository)")
+		}
 	}
 
 	ticker := time.NewTicker(o.Interval)
@@ -212,10 +235,12 @@ func (d *Deps) solveOne(ctx context.Context, o Options, issue *githubclient.Issu
 		git = solve.ExecGit
 	}
 	return solve.Solve(ctx, solve.Deps{
-		GitHub: d.GitHub,
-		AI:     d.AI,
-		Git:    git,
-		Log:    d.issueLog(issue.Number),
+		GitHub:       d.GitHub,
+		AI:           d.AI,
+		Git:          git,
+		DockerOK:     d.DockerOK,
+		RunInSandbox: d.RunInSandbox,
+		Log:          d.issueLog(issue.Number),
 	}, solve.Options{
 		Owner:        o.Owner,
 		Repo:         o.Repo,
@@ -223,8 +248,18 @@ func (d *Deps) solveOne(ctx context.Context, o Options, issue *githubclient.Issu
 		GitURL:       o.GitURL,
 		Base:         o.Base,
 		IncludeFiles: o.IncludeFiles,
+		Image:        o.Image,
 		DryRun:       o.DryRun,
 	})
+}
+
+// dockerOK returns Deps.DockerOK, or sandbox.DockerAvailable when it is
+// nil.
+func (d *Deps) dockerOK() func(context.Context) bool {
+	if d.DockerOK != nil {
+		return d.DockerOK
+	}
+	return sandbox.DockerAvailable
 }
 
 // existingFixPR returns the pull request on the issue's default fix

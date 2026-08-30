@@ -184,7 +184,10 @@ func newTestDeps(t *testing.T, gh *fakeGitHub, git solve.GitRunner) Deps {
 		GitHub: githubclient.NewClient(gh.srv.URL, "gh-token"),
 		AI:     newFakeAI(t),
 		Git:    git,
-		Log:    func(format string, args ...any) {}, // keep test output quiet
+		// Force the native fix-step path: these tests must not depend
+		// on a Docker daemon being present or not.
+		DockerOK: func(context.Context) bool { return false },
+		Log:      func(format string, args ...any) {}, // keep test output quiet
 	}
 }
 
