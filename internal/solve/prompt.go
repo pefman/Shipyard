@@ -7,71 +7,41 @@ import (
 	"github.com/pefman/Shipyard/internal/githubclient"
 )
 
-const (
-	// maxTreeLines caps how many files from git ls-files go into the
-	// prompt, so huge repos cannot blow up the context window.
-	maxTreeLines = 500
-)
-
-// BuildPrompt assembles the prompt sent to the AI endpoint: the issue
-// (title, body, labels) plus the repository context (file tree and the
-// contents of explicitly included files), the environment the fix will
-// be verified in (the sandbox image, on live runs), and the response
-// contract.
-func BuildPrompt(repo *githubclient.Repo, issue *githubclient.Issue, baseBranch, fileTree string, fileContents map[string]string, sandboxImage string) string {
+// BuildTask assembles the task prompt the built-in pi agent works from.
+// The agent runs inside the checkout with its own file and shell
+// tools, so the task carries the issue (title, body, labels), the
+// branch it is on, the environment its changes are verified in, and
+// the working contract: change only what the issue requires, verify
+// with the repository's own build and tests, and leave the changes in
+// the working tree (Shipyard commits and reviews them).
+func BuildTask(repo *githubclient.Repo, issue *githubclient.Issue, baseBranch, branch, environment string) string {
 	var b strings.Builder
-	b.WriteString("You are an autonomous engineer solving a GitHub issue in this repository.\n\n")
-	fmt.Fprintf(&b, "Repository: %s\n", repo.FullName)
-	if baseBranch != "" {
-		fmt.Fprintf(&b, "Base branch: %s\n", baseBranch)
-	}
-	fmt.Fprintf(&b, "Issue #%d: %s\n", issue.Number, issue.Title)
+	fmt.Fprintf(&b, "You are an autonomous software engineer working in a git checkout of the repository %s: the repository root is the current working directory, checked out on branch %s (based on %s).\n\n", repo.FullName, branch, orDefault(baseBranch, "its default branch"))
+	fmt.Fprintf(&b, "Task: resolve GitHub issue #%d\n", issue.Number)
+	fmt.Fprintf(&b, "Title: %s\n", issue.Title)
 	if len(issue.Labels) > 0 {
 		fmt.Fprintf(&b, "Labels: %s\n", strings.Join(issue.Labels, ", "))
 	}
 	if issue.Body != "" {
-		fmt.Fprintf(&b, "\nIssue body:\n%s\n", issue.Body)
-	}
-	tree := capLines(fileTree, maxTreeLines)
-	if tree != "" {
-		fmt.Fprintf(&b, "\nFiles in the repository (as of the base branch):\n%s\n", tree)
-	}
-	for _, path := range sortedKeys(fileContents) {
-		fmt.Fprintf(&b, "\nFile: %s\n```\n%s\n```\n", path, fileContents[path])
-	}
-	if sandboxImage != "" {
-		fmt.Fprintf(&b, "\nEnvironment: your fix will be built and tested in a disposable container running the %s image; write code and any commands for that toolchain.\n", sandboxImage)
+		fmt.Fprintf(&b, "\nIssue body:\n%s\n", strings.TrimSpace(issue.Body))
 	}
 	b.WriteString(`
-Your response:
-1. A brief explanation of the fix (2-5 sentences).
-2. ONE unified diff (git diff format) with all the changes that resolve
-   the issue, inside a fenced code block tagged "diff". The diff must
-   apply cleanly to the repository as of the base branch and must not
-   include unrelated changes. If you need to add a new file, include it
-   in the same diff (with /dev/null as the source path).
+Your job:
+1. Explore the repository as needed (read the relevant files, run commands) to understand the issue.
+2. Make the code changes the issue requires — and only those changes.
+3. Verify the changes: run this repository's build and test commands and fix what they reveal, iterating until they pass. Suitable commands by language: Go — ` + "`go build ./...`" + ` and ` + "`go test ./...`" + `; Python — compile the affected code (e.g. ` + "`python -m compileall -q .`" + `) and run the project's tests when it has them; Node.js — ` + "`npm install`" + ` and ` + "`npm test`" + ` (when a test script exists); Rust — ` + "`cargo build`" + ` and ` + "`cargo test`" + `.
+4. Keep the repository clean for the pull request: before you finish, remove anything your verification created inside it (compiled binaries, node_modules, __pycache__, target/ ...) — the pull request must contain only your intentional source changes. Prefer commands that verify without writing into the repository (e.g. ` + "`go build -o /dev/null ./...`" + `) when you have them.
+5. Do not commit, push, or open pull requests. Leave your changes in the working tree: Shipyard commits them and opens a pull request for review.
+6. When you are done, write a short summary: what you changed, why, and how you verified it.
+
+Environment: your changes are built and tested in ` + environment + `; write code and commands for that environment.
 `)
 	return b.String()
 }
 
-func capLines(s string, n int) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	if len(lines) <= n {
-		return strings.Join(lines, "\n")
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
 	}
-	return strings.Join(lines[:n], "\n") + fmt.Sprintf("\n... (%d more files)", len(lines)-n)
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// Simple insertion sort: the map is small (user-provided list).
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
-	return keys
+	return s
 }

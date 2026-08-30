@@ -1,10 +1,16 @@
-// Package solve implements Shipyard's core solving flow: fetch a GitHub
-// issue, ask the AI endpoint for a fix, apply the generated patch to a
-// local checkout of the repository, and open a pull request that links
-// the source issue.
+// Package solve implements Shipyard's core solving flow: fetch a
+// GitHub issue, let the built-in pi coding agent work on a checkout of
+// the repository (inside a disposable sandbox container when Docker is
+// available, natively otherwise), and — on live runs — commit the
+// agent's changes on a new branch, push it, and open a pull request
+// that links the source issue.
 //
-// The flow shells out to the git CLI for clone / apply / commit / push,
-// so the host (or container) running Shipyard must have git installed.
+// The agent (not a one-shot prompt) is the solving engine: it reads
+// the repository, edits it, runs the build and tests, and iterates.
+// Shipyard prepares the run (task prompt + endpoint/model
+// configuration, see internal/piagent), streams the agent's progress
+// to the log, enforces the per-issue budgets, and then applies the
+// same contract as before: no commit/push/PR unless the run succeeded.
 package solve
 
 import (
@@ -14,17 +20,17 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
-	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/githubclient"
-	"github.com/pefman/Shipyard/internal/sandbox"
+	"github.com/pefman/Shipyard/internal/piagent"
 )
 
 // GitRunner runs git commands. It exists so tests can fake git.
 type GitRunner interface {
-	// Run runs git with args in dir ("" runs with no working directory).
-	// It returns stdout; on failure the error includes git's stderr when
-	// it is not empty.
+	// Run runs git with args in dir ("" runs with no working
+	// directory). It returns stdout; on failure the error includes
+	// git's stderr when it is not empty.
 	Run(ctx context.Context, dir string, args ...string) (string, error)
 }
 
@@ -58,7 +64,8 @@ var credURLRe = regexp.MustCompile(`://[^@\s]+@`)
 
 // RedactCredentials replaces any user:pass / x-access-token:<token>
 // embedded in a URL with ***. Apply it to anything that may carry a
-// git command line or git's stderr before putting it in an error or log.
+// git command line, a git stderr, or an endpoint URL before putting it
+// in an error or log.
 func RedactCredentials(s string) string {
 	return credURLRe.ReplaceAllString(s, "://***@")
 }
@@ -85,25 +92,29 @@ type Options struct {
 	// shipyard/issue-<n>.
 	Branch string
 
-	// IncludeFiles are repo-relative file paths whose contents are
-	// embedded in the prompt, so the AI sees the code it is patching.
-	IncludeFiles []string
-
-	// Image names the sandbox image the fix step runs in on a live run
-	// (the --image flag). Empty: resolve it from the repository (the
-	// per-repo setting, once it lands, then auto-detection).
+	// Image names the language image the sandbox container is built on
+	// (the --image flag). Empty: resolve it from the repository
+	// (auto-detection from the repository contents). The built-in pi
+	// runtime is added to it by the wrapper image.
 	Image string
 
-	// DryRun stops after the patch has been applied to the workdir:
-	// nothing is committed, pushed, or opened.
+	// AgentConfig is the agent's endpoint/model configuration, mapped
+	// from the provider flags (see internal/config).
+	AgentConfig piagent.Config
+	// AgentMaxTurns caps the agent's assistant turns for the issue;
+	// <= 0 selects piagent.DefaultMaxTurns.
+	AgentMaxTurns int
+	// AgentTimeout caps the agent run's wall clock; <= 0 selects
+	// piagent.DefaultTimeout.
+	AgentTimeout time.Duration
+
+	// DryRun stops after the agent's work: nothing is committed,
+	// pushed, or opened (the changes stay in the workdir).
 	DryRun bool
 
-	// Verbose logs the full AI conversation through Deps.Log: the
-	// prompt sent, the response, the thinking/reasoning block when the
-	// endpoint returns one, and the call's HTTP status, latency, and
-	// finish_reason (the --verbose flag, env SHIPYARD_VERBOSE). Off by
-	// default: with it off the log output is exactly what it is
-	// without.
+	// Verbose logs the agent's raw event lines in addition to the
+	// rendered progress lines (the --verbose flag, env
+	// SHIPYARD_VERBOSE). Off by default.
 	Verbose bool
 }
 
@@ -111,17 +122,17 @@ type Options struct {
 type Deps struct {
 	// GitHub talks to the GitHub API (repo, issue, pull request).
 	GitHub *githubclient.Client
-	// AI is the chat-completions client.
-	AI *aiclient.Client
+	// Agent runs the built-in pi coding agent on the checkout (the
+	// solving engine). Nil uses piagent.DefaultRunner (the built-in
+	// pi runtime: wrapper image in the sandbox container, pi on PATH
+	// for native runs).
+	Agent piagent.Runner
 	// Git runs git commands; nil uses ExecGit.
 	Git GitRunner
 	// DockerOK reports whether the fix step can run in a sandbox
 	// (docker CLI on PATH, daemon answering); nil uses
 	// sandbox.DockerAvailable.
 	DockerOK func(ctx context.Context) bool
-	// RunInSandbox executes the fix-step commands in an ephemeral
-	// container; nil uses sandbox.Run.
-	RunInSandbox func(ctx context.Context, spec sandbox.RunSpec) (*sandbox.RunResult, error)
 	// TempDir is the directory for clones and scratch patch files;
 	// "" uses os.TempDir().
 	TempDir string
@@ -131,22 +142,20 @@ type Deps struct {
 
 // Result describes what a solve run produced.
 type Result struct {
-	// Workdir is the checkout the patch was applied to.
+	// Workdir is the checkout the agent worked in.
 	Workdir string
 	// Base and Branch are the branches involved.
 	Base   string
 	Branch string
-	// Explanation is the AI's prose explanation of the fix.
-	Explanation string
-	// Patch is the unified diff extracted from the AI response.
+	// Summary is the agent's final summary of the fix.
+	Summary string
+	// Patch is the unified diff of the agent's changes against base.
 	Patch string
-	// PatchPath is where the extracted patch was saved for inspection.
+	// PatchPath is where the diff was saved for inspection.
 	PatchPath string
-	// ResponsePath is where the raw AI response was saved.
-	ResponsePath string
 	// PR is the opened pull request (nil for --dry-run).
 	PR *githubclient.PR
-	// Sandbox is the image the fix step ran in; empty when the fix
-	// step ran natively (dry runs, or Docker was not available).
+	// Sandbox is the image the agent ran in (the built-in wrapper
+	// image); empty when the agent ran natively on the host.
 	Sandbox string
 }

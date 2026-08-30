@@ -2,33 +2,36 @@ package solve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/piagent"
 	"github.com/pefman/Shipyard/internal/sandbox"
 )
 
-// Solve runs the core solving flow: issue → AI → patch → PR.
+// Solve runs the core solving flow: issue → agent → changes → PR.
 //
 //  1. fetch repo info and the issue from the GitHub API
 //  2. ensure a local checkout (use Options.Workdir or clone)
-//  3. build the prompt (issue + labels + file tree + included files)
-//  4. call the AI endpoint
-//  5. extract the unified diff (error: no usable changes)
-//  6. run the fix step — apply the patch, then build and test it:
-//     in a disposable sandbox container on live runs (never on the
-//     host), natively when --dry-run or Docker is unavailable (error:
-//     patch does not apply / a verification step fails)
-//  7. stop if Options.DryRun
-//  8. commit on a new branch, push
-//  9. open a pull request that links the source issue
+//  3. prepare the agent run: the task prompt (issue + instructions)
+//     and the endpoint/model configuration, written into the checkout
+//  4. run the built-in pi coding agent on the checkout — inside a
+//     disposable sandbox container when Docker is available (the
+//     wrapper image adds the built-in pi runtime to the resolved
+//     language image; the agent's build/test verification steps run
+//     in the same container, right after it), natively on the host
+//     when Docker is unavailable
+//  5. fail when the agent made no changes (nothing usable to review)
+//  6. stop if Options.DryRun
+//  7. commit on a new branch, push
+//  8. open a pull request that links the source issue
 func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
-	if d.GitHub == nil || d.AI == nil {
-		return nil, fmt.Errorf("solve: Deps.GitHub and Deps.AI are required")
+	if d.GitHub == nil {
+		return nil, fmt.Errorf("solve: Deps.GitHub is required")
 	}
 	if o.Owner == "" || o.Repo == "" {
 		return nil, fmt.Errorf("solve: owner/repo is required")
@@ -36,14 +39,14 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	if o.IssueNumber <= 0 {
 		return nil, fmt.Errorf("solve: issue number is required")
 	}
+	if d.Agent == nil {
+		d.Agent = piagent.DefaultRunner
+	}
 	if d.Git == nil {
 		d.Git = ExecGit
 	}
 	if d.DockerOK == nil {
 		d.DockerOK = sandbox.DockerAvailable
-	}
-	if d.RunInSandbox == nil {
-		d.RunInSandbox = sandbox.Run
 	}
 	if d.Log == nil {
 		d.Log = func(format string, args ...any) { fmt.Fprintf(os.Stderr, "shipyard: "+format+"\n", args...) }
@@ -60,6 +63,7 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return nil, fmt.Errorf("fetching issue #%d from %s/%s: %w (check the GitHub token and the issue number)", o.IssueNumber, o.Owner, o.Repo, err)
 	}
 	log("solving %s (issue #%d: %s)", repo.FullName, issue.Number, issue.Title)
+	log("engine: pi-agent (built-in, pi %s): model %s via %s", piagent.Version, o.AgentConfig.Model, RedactCredentials(o.AgentConfig.Endpoint))
 
 	base := firstNonEmpty(o.Base, repo.DefaultBranch)
 	if base == "" {
@@ -81,140 +85,97 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	log("working on branch %s (base %s)", branch, base)
 
 	// --- sandbox decision ---------------------------------------------
-	// Live runs execute the fix step in a disposable container; the AI
-	// must know that environment before it writes the fix, so this
-	// happens before the prompt is built.
-	sandboxImage := ""
-	if o.DryRun {
-		log("sandbox: off (dry-run)")
-	} else if d.DockerOK(ctx) {
+	// The agent runs inside a disposable container whenever Docker is
+	// available (live and dry runs alike: the agent executes code, so
+	// the container is the safe choice); without Docker it runs
+	// natively on the host. The language image is resolved before the
+	// task prompt is built, because the agent must know the
+	// environment its changes are built and tested in.
+	baseImage := ""
+	var verifyCommands []string
+	environment := "the host machine it runs on"
+	if d.DockerOK(ctx) {
 		img, source := sandbox.ResolveImageWithSource(o.Image, workdir)
-		sandboxImage = img
-		log("sandbox: %s (source: %s)", sandboxImage, source)
+		baseImage = img
+		verifyCommands = sandbox.FixCommands(baseImage)
+		environment = "a disposable container running the " + baseImage + " image"
+		log("sandbox: %s (source: %s)", baseImage, source)
 	} else {
-		log("sandbox: off (Docker not available: the fix step runs natively on the host)")
+		log("sandbox: off (Docker not available: the agent runs natively on the host)")
 	}
 
-	// --- prompt -----------------------------------------------------
-	tree, err := git.Run(ctx, workdir, "ls-files")
+	// --- agent run ----------------------------------------------------
+	task := BuildTask(repo, issue, base, branch, environment)
+	outcome, err := d.Agent.RunAgent(ctx, piagent.RunSpec{
+		Workdir:        workdir,
+		Task:           task,
+		Config:         o.AgentConfig,
+		BaseImage:      baseImage,
+		VerifyCommands: verifyCommands,
+		MaxTurns:       o.AgentMaxTurns,
+		Timeout:        o.AgentTimeout,
+		Verbose:        o.Verbose,
+		Log:            log,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("listing files in %s: %w", workdir, err)
+		if o.DryRun {
+			// A dry run opens nothing: the agent's partial or absent
+			// work stays in the workdir for inspection instead of
+			// failing the run — the point of a dry run is to see what
+			// the agent does.
+			log("dry run: the agent run ended without a clean result (%v); the workdir is left for inspection.", err)
+		}
+		return nil, fmt.Errorf("agent run: %w", err)
 	}
-	fileContents, err := readIncludeFiles(workdir, o.IncludeFiles)
+	if outcome.StoppedByBudget {
+		return nil, fmt.Errorf("agent stopped: budget exhausted (no commit, push, or PR was made)")
+	}
+	log("agent finished in %d turn%s; its changes are in %s", outcome.Turns, pluralize(outcome.Turns), workdir)
+
+	// --- changes ------------------------------------------------------
+	// Stage everything (the agent may have added files) and take the
+	// full diff against the base branch.
+	if _, err := git.Run(ctx, workdir, "add", "-A"); err != nil {
+		return nil, fmt.Errorf("staging the agent's changes: %w", err)
+	}
+	patch, err := git.Run(ctx, workdir, "diff", "--cached")
+	if err != nil {
+		return nil, fmt.Errorf("reading the agent's changes: %w", err)
+	}
+	if strings.TrimSpace(patch) == "" {
+		return nil, fmt.Errorf("%w (its final message: %s)", ErrNoUsableChanges, oneLine(outcome.Summary, 200))
+	}
+	patchPath, err := saveToTemp(d.TempDir, "shipyard-changes", ".patch", patch)
 	if err != nil {
 		return nil, err
 	}
-	prompt := BuildPrompt(repo, issue, base, tree, fileContents, sandboxImage)
-
-	// --- AI call ----------------------------------------------------
-	log("calling AI endpoint ...")
-	if o.Verbose {
-		// Full conversation for debugging weak or local models from the
-		// log alone: everything sent and everything received. URLs with
-		// embedded credentials stay redacted, as everywhere else.
-		for _, line := range d.AI.VerboseRequestLines(prompt) {
-			log("%s", RedactCredentials(line))
-		}
-	}
-	completion, err := d.AI.Complete(ctx, prompt)
-	if err != nil {
-		if o.Verbose {
-			// A failed call is exactly the case the verbose log exists
-			// for (a 500 from a local endpoint, a timeout, a non-JSON
-			// body): keep the diagnostics in the log, not just the raw
-			// error string.
-			for _, line := range d.AI.VerboseCompletionLines(completion) {
-				log("%s", RedactCredentials(line))
-			}
-		}
-		return nil, fmt.Errorf("calling AI endpoint: %w", err)
-	}
-	if o.Verbose {
-		for _, line := range d.AI.VerboseCompletionLines(completion) {
-			log("%s", RedactCredentials(line))
-		}
-	}
-	response := completion.Content
-	responsePath, err := saveToTemp(d.TempDir, "shipyard-response", ".txt", response)
-	if err != nil {
-		return nil, err
-	}
-	log("raw AI response saved to %s", responsePath)
-
-	// --- patch extraction -------------------------------------------
-	patch, explanation, err := ExtractPatch(response)
-	if err != nil {
-		return nil, err
-	}
-	patchPath, err := saveToTemp(d.TempDir, "shipyard-patch", ".patch", patch)
-	if err != nil {
-		return nil, err
-	}
-	log("extracted patch saved to %s", patchPath)
-
-	// --- fix step -------------------------------------------------
-	// Apply the patch, then build and test it: in the sandbox on live
-	// runs, natively otherwise (dry runs, no Docker available).
-	if sandboxImage != "" {
-		commands := append([]string{ApplyPatchCommand(patch)}, sandbox.FixCommands(sandboxImage)...)
-		run, err := d.RunInSandbox(ctx, sandbox.RunSpec{
-			Image:    sandboxImage,
-			Workdir:  workdir,
-			Commands: commands,
-			Log:      log,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("fix step in sandbox: %w", err)
-		}
-		if !run.OK {
-			for i, s := range run.Steps {
-				if !s.Ran {
-					return nil, fmt.Errorf("fix step failed in sandbox: step %d of %d (%q) did not run — no commit, push, or PR was made", i+1, len(run.Steps), s.Command)
-				}
-				if s.ExitCode != 0 {
-					return nil, fmt.Errorf("fix step failed in sandbox: step %d of %d (%q) exited %d — no commit, push, or PR was made", i+1, len(run.Steps), s.Command, s.ExitCode)
-				}
-			}
-		}
-		log("fix step passed in %s: patch applied to %s", sandboxImage, workdir)
-	} else {
-		if err := ApplyPatch(ctx, git, workdir, patch, patchPath); err != nil {
-			return nil, err
-		}
-		log("patch applied to %s", workdir)
-	}
+	log("agent's changes saved to %s", patchPath)
 
 	res := &Result{
-		Workdir:      workdir,
-		Base:         base,
-		Branch:       branch,
-		Sandbox:      sandboxImage,
-		Explanation:  explanation,
-		Patch:        patch,
-		PatchPath:    patchPath,
-		ResponsePath: responsePath,
+		Workdir:   workdir,
+		Base:      base,
+		Branch:    branch,
+		Sandbox:   outcome.Image,
+		Summary:   outcome.Summary,
+		Patch:     patch,
+		PatchPath: patchPath,
 	}
 	if o.DryRun {
-		stat, statErr := git.Run(ctx, workdir, "diff", "--stat")
+		stat, statErr := git.Run(ctx, workdir, "diff", "--cached", "--stat")
 		if statErr != nil {
 			log("warning: could not show the diff stat: %v", statErr)
-		}
-		log("dry run: nothing committed, pushed, or opened; the workdir is left dirty for you to inspect.")
-		if statErr == nil {
+		} else {
 			log("diff stat:\n%s", strings.TrimRight(stat, "\n"))
 		}
+		log("dry run: nothing committed, pushed, or opened; the workdir is left dirty for you to inspect.")
 		return res, nil
 	}
 
 	// --- commit + push ------------------------------------------------
-	msg := fmt.Sprintf("Fix #%d: %s\n\n%s", issue.Number, issue.Title, strings.TrimSpace(explanation))
-	if _, err := git.Run(ctx, workdir, "add", "-A"); err != nil {
-		return nil, fmt.Errorf("staging changes: %w", err)
-	}
-	commitArgs := identityArgs(ctx, git, workdir)
-	commitArgs = append(commitArgs, "commit", "-m", msg)
+	msg := fmt.Sprintf("Fix #%d: %s\n\n%s", issue.Number, issue.Title, strings.TrimSpace(outcome.Summary))
+	commitArgs := append(identityArgs(ctx, git, workdir), "commit", "-m", msg)
 	if _, err := git.Run(ctx, workdir, commitArgs...); err != nil {
-		return nil, fmt.Errorf("committing changes: %w", err)
+		return nil, fmt.Errorf("committing the agent's changes: %w", err)
 	}
 	log("committed on %s", branch)
 	if refs, _ := git.Run(ctx, workdir, "ls-remote", "--heads", "origin", branch); strings.TrimSpace(refs) != "" {
@@ -230,7 +191,7 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 		Title: title,
 		Head:  branch,
 		Base:  base,
-		Body:  PRBody(issue, o.Owner, o.Repo, branch, base, explanation),
+		Body:  PRBody(issue, o.Owner, o.Repo, branch, base, outcome.Summary),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opening pull request: %w", err)
@@ -249,8 +210,23 @@ func ensureCheckout(ctx context.Context, d Deps, o Options, repo *githubclient.R
 		if err != nil {
 			return "", false, fmt.Errorf("%s is not a git working tree: %w", o.Workdir, err)
 		}
-		if strings.TrimSpace(status) != "" {
-			return "", false, fmt.Errorf("%s has uncommitted changes; commit or stash them first", o.Workdir)
+		if status := strings.TrimSpace(status); status != "" {
+			if strings.Contains(status, piagent.DirName) {
+				// A previous run left the agent's config directory
+				// behind; it is git-excluded, so ignore only its
+				// entries (a clean checkout otherwise stays required).
+				rest := ""
+				for _, line := range strings.Split(status, "\n") {
+					if !strings.Contains(line, piagent.DirName) {
+						rest += line + "\n"
+					}
+				}
+				if strings.TrimSpace(rest) != "" {
+					return "", false, fmt.Errorf("%s has uncommitted changes; commit or stash them first", o.Workdir)
+				}
+			} else {
+				return "", false, fmt.Errorf("%s has uncommitted changes; commit or stash them first", o.Workdir)
+			}
 		}
 		if _, err := git.Run(ctx, o.Workdir, "fetch", "--quiet", "origin", base); err != nil {
 			log("warning: could not refresh origin/%s (continuing with the local copy): %v", base, err)
@@ -288,25 +264,9 @@ func newBranch(ctx context.Context, git GitRunner, dir, branch, base string) err
 	return nil
 }
 
-// readIncludeFiles loads the contents of the requested files relative to
-// workdir. A file missing from the checkout is an error: the prompt
-// would otherwise show the AI a file that does not exist.
-func readIncludeFiles(workdir string, files []string) (map[string]string, error) {
-	out := make(map[string]string, len(files))
-	for _, f := range files {
-		path := filepath.Join(workdir, filepath.FromSlash(f))
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading include file %s: %w", f, err)
-		}
-		out[f] = string(data)
-	}
-	return out, nil
-}
-
-// identityArgs builds leading "-c user.name=..."/"-c user.email=..."
-// flags (git only accepts -c before the subcommand) for a checkout that
-// has no git identity configured.
+// identityArgs returns leading "-c user.name=..."/"-c user.email=..."
+// flags (git only accepts -c before the subcommand) for a checkout
+// that has no git identity configured.
 func identityArgs(ctx context.Context, git GitRunner, dir string) []string {
 	name, _ := git.Run(ctx, dir, "config", "user.name")
 	email, _ := git.Run(ctx, dir, "config", "user.email")
@@ -320,22 +280,23 @@ func identityArgs(ctx context.Context, git GitRunner, dir string) []string {
 	return args
 }
 
-// PRBody builds the pull request description. It links the source issue
-// and records that Shipyard generated the change.
-func PRBody(issue *githubclient.Issue, owner, repo, branch, base, explanation string) string {
+// PRBody builds the pull request description. It links the source
+// issue and records that Shipyard's built-in agent generated the
+// change.
+func PRBody(issue *githubclient.Issue, owner, repo, branch, base, summary string) string {
 	var b strings.Builder
-	b.WriteString("<!-- Generated by Shipyard: an AI endpoint proposed this fix for the linked issue. Review it carefully before merging. -->\n\n")
+	b.WriteString("<!-- Generated by Shipyard: its built-in pi coding agent made this change for the linked issue. Review it carefully before merging. -->\n\n")
 	fmt.Fprintf(&b, "Solves [%s](%s) (#%d).\n\n", issue.Title, issue.HTMLURL, issue.Number)
 	if issue.Body != "" {
 		b.WriteString("<details>\n<summary>Source issue body</summary>\n\n")
 		b.WriteString(issue.Body + "\n\n</details>\n\n")
 	}
-	if strings.TrimSpace(explanation) != "" {
+	if strings.TrimSpace(summary) != "" {
 		b.WriteString("## Summary\n\n")
-		b.WriteString(strings.TrimSpace(explanation) + "\n\n")
+		b.WriteString(strings.TrimSpace(summary) + "\n\n")
 	}
-	fmt.Fprintf(&b, "## Changes\n\nGenerated patch applied to `%s`; full diff on branch `%s` → `%s`.\n", base, branch, base)
-	fmt.Fprintf(&b, "Generated by [Shipyard](https://github.com/%s/%s). Fix #%d.", owner, repo, issue.Number)
+	fmt.Fprintf(&b, "## Changes\n\nThe agent's changes to `%s`; full diff on branch `%s` → `%s`.\n", base, branch, base)
+	fmt.Fprintf(&b, "Generated by [Shipyard](https://github.com/%s/%s) (built-in pi agent). Fix #%d.", owner, repo, issue.Number)
 	return b.String()
 }
 
@@ -364,4 +325,24 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// ErrNoUsableChanges is returned when the agent's run left the
+// repository unchanged: there is nothing to commit or review.
+var ErrNoUsableChanges = errors.New("the agent made no usable changes: the repository is unchanged after the agent run")
+
+// oneLine collapses s to a single line capped at n characters.
+func oneLine(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
+func pluralize(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

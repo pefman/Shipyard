@@ -18,6 +18,7 @@ func resetGuardrailEnv(t *testing.T) {
 	t.Setenv("SHIPYARD_MODE", "")
 	t.Setenv("SHIPYARD_GITHUB_TOKEN", "gh-test-token")
 	t.Setenv("SHIPYARD_AI_ENDPOINT", "http://127.0.0.1:1/v1")
+	t.Setenv("SHIPYARD_AI_MODEL", "mock-model")
 }
 
 // TestPrepareListenEnvOnlyReposGuardsRun: a run guarded purely through

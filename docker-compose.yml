@@ -6,6 +6,7 @@
 # so set SHIPYARD_REPOS (or SHIPYARD_LABELS) or pass --dry-run:
 #
 #   export SHIPYARD_GITHUB_TOKEN=... SHIPYARD_AI_ENDPOINT=... SHIPYARD_AI_KEY=...
+#   export SHIPYARD_AI_MODEL=...        # the model name the endpoint serves
 #   export SHIPYARD_REPO=owner/repo SHIPYARD_ISSUE=42
 #   export SHIPYARD_REPOS=owner/repo   # guardrail for the live run
 #   docker compose run --rm solve
@@ -41,6 +42,9 @@ services:
       SHIPYARD_GITHUB_TOKEN: "${SHIPYARD_GITHUB_TOKEN:?set SHIPYARD_GITHUB_TOKEN}"
       SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
       SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
+      # the model the built-in agent uses; the name must be one the
+      # endpoint serves (any name for a local mock like hack/mockai)
+      SHIPYARD_AI_MODEL: "${SHIPYARD_AI_MODEL:?set SHIPYARD_AI_MODEL}"
       SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
       # guardrails: a live solve with neither allowlist set is refused;
       # export SHIPYARD_REPOS=owner/repo (and/or SHIPYARD_LABELS) to go live
@@ -66,6 +70,9 @@ services:
       SHIPYARD_GITHUB_TOKEN: "${SHIPYARD_GITHUB_TOKEN:?set SHIPYARD_GITHUB_TOKEN}"
       SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
       SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
+      # the model the built-in agent uses; the name must be one the
+      # endpoint serves (any name for a local mock like hack/mockai)
+      SHIPYARD_AI_MODEL: "${SHIPYARD_AI_MODEL:?set SHIPYARD_AI_MODEL}"
       SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
       # allowlists (optional for dry runs; at least one is required for
       # a live run, which shipyard enforces at startup)
@@ -94,6 +101,9 @@ services:
       SHIPYARD_GITHUB_TOKEN: "${SHIPYARD_GITHUB_TOKEN:?set SHIPYARD_GITHUB_TOKEN}"
       SHIPYARD_AI_ENDPOINT: "${SHIPYARD_AI_ENDPOINT:?set SHIPYARD_AI_ENDPOINT}"
       SHIPYARD_AI_KEY: "${SHIPYARD_AI_KEY:-}"
+      # the model the built-in agent uses; the name must be one the
+      # endpoint serves (any name for a local mock like hack/mockai)
+      SHIPYARD_AI_MODEL: "${SHIPYARD_AI_MODEL:?set SHIPYARD_AI_MODEL}"
       SHIPYARD_GITHUB_API: "${SHIPYARD_GITHUB_API:-}"
       # at least one allowlist must be set, otherwise shipyard itself
       # refuses to start the live run (or pass --i-know-this-is-unguarded)

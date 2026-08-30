@@ -1,28 +1,30 @@
-// Command mockai is a tiny OpenAI-compatible chat completions server for
-// testing Shipyard locally without a real AI endpoint:
+// mockai is a developer-only mock of an OpenAI-compatible chat
+// endpoint that streams a canned response as an SSE stream — the shape
+// the built-in pi agent (and pi's openai-completions API) expects.
 //
-//	mockai --port 8765 --response-file canned-response.md
-//	mockai --port 8765 --response 'explanation here
-//	```diff
-//	--- a/f.go
-//	+++ b/f.go
-//	@@ -1 +1 @@
-//	-old
-//	+new
-//	```'
+// It exists so a real, unsanitized end-to-end run of the built-in
+// agent can be exercised without a live model, without spending
+// provider credits, and without leaking secrets into a provider:
 //
-// Any POST (typically /chat/completions) receives
-// {"model": ..., "messages": [...]} and gets back the configured
-// response wrapped in the standard chat-completions envelope, so
-// SHIPYARD_AI_ENDPOINT can point at http://127.0.0.1:8765/v1.
+//	go run ./hack/mockai --port 8765 --response-file /tmp/canned.txt &
 //
-// The requests it receives (model and prompt) are logged to stderr.
+// Then point shipyard at it, with a dummy model name:
+//
+//	shipyard solve --repo <repo> --issue <n> \
+//	  --provider custom --ai-endpoint http://127.0.0.1:8765/v1 \
+//	  --ai-model mock-model ...
+//
+// The agent sees the response as one assistant turn (chunked content
+// deltas ending with a stop finish). The response file should contain text an agent can act
+// on — instructions and code it writes or edits in the checkout — not
+// a raw diff (the agent applies changes itself).
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -30,52 +32,91 @@ import (
 
 func main() {
 	port := flag.Int("port", 8765, "TCP port to listen on")
-	respFile := flag.String("response-file", "", "file containing the canned AI response")
-	resp := flag.String("response", "", "canned AI response (inline)")
+	responseFile := flag.String("response-file", "", "file whose contents are returned as the model response")
+	defaultText := flag.String("text", "Done. (mockai: no --response-file given)", "response text when --response-file is unset")
 	flag.Parse()
 
-	body := ""
-	if *respFile != "" {
-		data, err := os.ReadFile(*respFile)
+	response := *defaultText
+	if *responseFile != "" {
+		data, err := os.ReadFile(*responseFile)
 		if err != nil {
-			log.Fatalf("mockai: reading --response-file: %v", err)
+			log.Fatalf("reading --response-file: %v", err)
 		}
-		body = string(data)
-	} else if *resp != "" {
-		body = *resp
-	} else {
-		log.Fatal("mockai: pass --response or --response-file")
+		response = string(data)
 	}
 
-	serve := func(w http.ResponseWriter, r *http.Request) {
-		// Log the prompt so you can inspect what Shipyard sent.
-		fmt.Fprintf(os.Stderr, "mockai: %s %s\n", r.Method, r.URL.Path)
-		var req struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if len(req.Messages) > 0 {
-			fmt.Fprintf(os.Stderr, "mockai: model=%s prompt=%q\n", req.Model, req.Messages[0].Content)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		envelope := map[string]any{
-			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": body}}},
-		}
-		if err := json.NewEncoder(w).Encode(envelope); err != nil {
-			log.Printf("mockai: writing response: %v", err)
-		}
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", serve) // accept any path: /v1/chat/completions, /chat/completions, ...
-	log.Printf("mockai listening on 127.0.0.1:%d (use SHIPYARD_AI_ENDPOINT=http://127.0.0.1:%d/v1)", *port, *port)
-	if err := http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", *port), mux); err != nil {
+	log.Printf("mockai: listening on :%d (response: %d bytes)", *port, len(response))
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), newHandler(response)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// newHandler wires the mock endpoint: a health check on GET / and the
+// streaming chat completion on POST /v1/chat/completions.
+func newHandler(response string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "mockai ok")
+	})
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		// One assistant turn: chunked content deltas, then a stop
+		// finish (the agent ends its turn; as a mock there is no tool
+		// call to continue the loop with).
+		writeSSE(w, fl, chunk([]map[string]any{
+			{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}, "finish_reason": nil},
+		}))
+		for _, piece := range chunkText(response, 64) {
+			writeSSE(w, fl, chunk([]map[string]any{
+				{"index": 0, "delta": map[string]any{"content": piece}, "finish_reason": nil},
+			}))
+		}
+		writeSSE(w, fl, chunk([]map[string]any{
+			{"index": 0, "delta": map[string]any{"content": ""}, "finish_reason": "stop"},
+		}))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	})
+	return mux
+}
+
+// chunk builds one SSE payload: a chat.completion.chunk wrapper.
+func chunk(choices []map[string]any) any {
+	return map[string]any{
+		"id":      "cmpl-mockai",
+		"object":  "chat.completion.chunk",
+		"choices": choices,
+	}
+}
+
+func writeSSE(w io.Writer, f http.Flusher, payload any) {
+	marshaled, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("mockai: %v", err)
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", marshaled)
+	f.Flush()
+}
+
+func chunkText(s string, size int) []string {
+	if size <= 0 {
+		size = 64
+	}
+	var out []string
+	for len(s) > 0 {
+		n := size
+		if n > len(s) {
+			n = len(s)
+		}
+		out = append(out, s[:n])
+		s = s[n:]
+	}
+	return out
 }
