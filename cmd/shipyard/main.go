@@ -92,6 +92,11 @@ Solve flags:
                          (env SHIPYARD_AGENT_MAX_TURNS; default 30)
   --agent-timeout <dur>  Cap the agent run's wall clock per issue
                          (env SHIPYARD_AGENT_TIMEOUT; default 30m)
+  --agent-context-window <n>  Context window (tokens) to declare for the model,
+                         driving the agent's built-in context compaction
+                         (env SHIPYARD_AGENT_CONTEXT_WINDOW; default 128000 —
+                         set it to your local model's real window for local
+                         endpoints)
   --workdir <dir>        Local checkout to build on (default: clone to a temp dir)
   --base <branch>        Base branch (default: the repo's default branch)
   --branch <name>        Branch for the fix (default: shipyard/issue-<n>)
@@ -149,6 +154,11 @@ Listen flags:
                          (env SHIPYARD_AGENT_MAX_TURNS; default 30)
   --agent-timeout <dur>  Cap the agent run's wall clock per issue
                          (env SHIPYARD_AGENT_TIMEOUT; default 30m)
+  --agent-context-window <n>  Context window (tokens) to declare for the model,
+                         driving the agent's built-in context compaction
+                         (env SHIPYARD_AGENT_CONTEXT_WINDOW; default 128000 —
+                         set it to your local model's real window for local
+                         endpoints)
   --dry-run              Dry-run mode (the default for listen): the agent's work
                          is kept but nothing is committed and no pull requests
                          are opened. Takes precedence over SHIPYARD_MODE;
@@ -193,6 +203,7 @@ func runSolve(args []string) error {
 	branch := fs.String("branch", "", "branch for the fix (default: shipyard/issue-<n>)")
 	agentMaxTurns := fs.Int("agent-max-turns", -1, "cap the agent's assistant turns for the issue (env SHIPYARD_AGENT_MAX_TURNS; default 30)")
 	agentTimeout := fs.Duration("agent-timeout", 0, "cap the agent run's wall clock (env SHIPYARD_AGENT_TIMEOUT; default 30m)")
+	agentContextWindow := fs.Int("agent-context-window", 0, "context window (tokens) to declare for the model (env SHIPYARD_AGENT_CONTEXT_WINDOW; default 128000 — set it for local models with a smaller real window)")
 	gitURL := fs.String("git-url", "", "git clone URL (with --workdir unset)")
 	dryRun := fs.Bool("dry-run", false, "stop after the agent's work: no commit, push, or PR")
 	verbose := fs.Bool("verbose", verboseFromEnv(), "log the agent's raw event lines in addition to the rendered progress (env SHIPYARD_VERBOSE=1)")
@@ -250,12 +261,17 @@ func runSolve(args []string) error {
 	if err != nil {
 		return err
 	}
+	contextWindow, err := resolveAgentContextWindow(*agentContextWindow, os.Getenv(envAgentContextWindow))
+	if err != nil {
+		return err
+	}
 
 	agentConfig := piagent.Config{
-		Provider: cfg.AIProvider,
-		Endpoint: cfg.AIEndpoint,
-		APIKey:   cfg.AIKey,
-		Model:    cfg.AIModel,
+		Provider:      cfg.AIProvider,
+		Endpoint:      cfg.AIEndpoint,
+		APIKey:        cfg.AIKey,
+		Model:         cfg.AIModel,
+		ContextWindow: contextWindow,
 	}
 	if err := agentConfig.Validate(); err != nil {
 		return err
@@ -326,12 +342,13 @@ type guardrailInput struct {
 }
 
 const (
-	envRepos     = "SHIPYARD_REPOS"
-	envLabels    = "SHIPYARD_LABELS"
-	envMaxPRs    = "SHIPYARD_MAX_PRS"
-	envVerbose   = "SHIPYARD_VERBOSE"
-	envAgentMaxTurns = "SHIPYARD_AGENT_MAX_TURNS"
-	envAgentTimeout  = "SHIPYARD_AGENT_TIMEOUT"
+	envRepos              = "SHIPYARD_REPOS"
+	envLabels             = "SHIPYARD_LABELS"
+	envMaxPRs             = "SHIPYARD_MAX_PRS"
+	envVerbose            = "SHIPYARD_VERBOSE"
+	envAgentMaxTurns      = "SHIPYARD_AGENT_MAX_TURNS"
+	envAgentTimeout       = "SHIPYARD_AGENT_TIMEOUT"
+	envAgentContextWindow = "SHIPYARD_AGENT_CONTEXT_WINDOW"
 )
 
 // resolveMaxTurns resolves the agent turn budget: the flag wins over the
@@ -365,6 +382,23 @@ func resolveAgentTimeout(flag time.Duration, env string) (time.Duration, error) 
 		return 0, fmt.Errorf("invalid %s value %q (want a duration like 45m)", envAgentTimeout, env)
 	}
 	return d, nil
+}
+
+// resolveAgentContextWindow resolves the context window declared for the
+// agent's model (flag over environment; both unset selects
+// piagent.DefaultContextWindow, returned as 0 for the flow to apply).
+func resolveAgentContextWindow(flag int, env string) (int, error) {
+	if flag > 0 {
+		return flag, nil
+	}
+	if env == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(env)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid %s value %q (want a positive number of tokens)", envAgentContextWindow, env)
+	}
+	return n, nil
 }
 
 // verboseFromEnv reports whether SHIPYARD_VERBOSE asks for the full AI

@@ -240,3 +240,38 @@ func TestPrepareListenModeResolution(t *testing.T) {
 		t.Error("--live and --dry-run together: expected an error")
 	}
 }
+
+// TestPrepareListenAgentContextWindow: --agent-context-window (or its
+// env) lands in the agent config as the context window declared to the
+// agent (flag wins over environment; both unset leaves the piagent
+// default to be applied).
+func TestPrepareListenAgentContextWindow(t *testing.T) {
+	resetGuardrailEnv(t)
+	t.Setenv("SHIPYARD_AGENT_CONTEXT_WINDOW", "")
+
+	run, err := prepareListen([]string{"--repo", "towner/trepo"})
+	if err != nil {
+		t.Fatalf("prepareListen: %v", err)
+	}
+	if run.Options.AgentConfig.ContextWindow != 0 {
+		t.Errorf("ContextWindow = %d, want 0 (the piagent default applies)", run.Options.AgentConfig.ContextWindow)
+	}
+
+	t.Setenv("SHIPYARD_AGENT_CONTEXT_WINDOW", "4096")
+	run, err = prepareListen([]string{"--repo", "towner/trepo"})
+	if err != nil {
+		t.Fatalf("prepareListen with env: %v", err)
+	}
+	if run.Options.AgentConfig.ContextWindow != 4096 {
+		t.Errorf("ContextWindow = %d, want 4096 from the environment", run.Options.AgentConfig.ContextWindow)
+	}
+
+	// The flag wins over the environment.
+	run, err = prepareListen([]string{"--repo", "towner/trepo", "--agent-context-window", "8192"})
+	if err != nil {
+		t.Fatalf("prepareListen with the flag: %v", err)
+	}
+	if run.Options.AgentConfig.ContextWindow != 8192 {
+		t.Errorf("ContextWindow = %d, want 8192 from the flag", run.Options.AgentConfig.ContextWindow)
+	}
+}
