@@ -42,6 +42,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "shipyard:", err)
 			os.Exit(1)
 		}
+	case "whoami":
+		if err := runWhoami(args); err != nil {
+			fmt.Fprintln(os.Stderr, "shipyard:", err)
+			os.Exit(1)
+		}
+	case "logout":
+		if err := runLogout(); err != nil {
+			fmt.Fprintln(os.Stderr, "shipyard:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -58,6 +68,8 @@ Usage:
   shipyard solve --repo <repo> --issue <n> [flags]
   shipyard listen --repo <repo> [flags]
   shipyard login [flags]
+  shipyard whoami [flags]
+  shipyard logout
 
 Solve flags:
   --repo <repo>          GitHub repository (required): owner/repo, or
@@ -65,7 +77,8 @@ Solve flags:
                          ssh://git@github.com/owner/repo, or github.com/owner/repo
                          (a trailing .git is stripped)
   --issue <n>            Issue number to solve (required)
-  --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN)
+  --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN, else the
+                         token stored by "shipyard login")
   --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
                          default custom: --ai-endpoint required, key optional)
   --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
@@ -110,7 +123,8 @@ Listen flags:
                          requests
   --label <name>         Only solve issues carrying this label (repeatable)
   --state-file <path>    File tracking processed issues (default: shipyard-listen-state.json)
-  --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN)
+  --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN, else the
+                         token stored by "shipyard login")
   --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
                          default custom: --ai-endpoint required, key optional)
   --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
@@ -131,11 +145,20 @@ Login flags:
                           default: the built-in pre-registered app — login works with zero config)
   --force                Redo the device flow even if a valid stored token exists
 
+Whoami flags:
+  --github-token <t>     Verify this token via GET /user instead of the stored login
+                         (env SHIPYARD_GITHUB_TOKEN)
+  --github-api <url>     GitHub API root (env SHIPYARD_GITHUB_API; default
+                         https://api.github.com)
+
 The device flow prints a verification URI and a one-time code; after you
 authorize at the URI, the access token is verified via GET /user and stored
 at $XDG_CONFIG_HOME/shipyard/credentials.json (default
 ~/.config/shipyard/credentials.json) with 0600 permissions. Re-running
 the command while a valid token is stored just verifies it and exits.
+"shipyard whoami" shows which identity the token precedence (flag, env,
+stored login) resolves to; "shipyard logout" removes the stored
+credentials file.
 `)
 }
 
@@ -143,7 +166,7 @@ func runSolve(args []string) error {
 	fs := flag.NewFlagSet("solve", flag.ExitOnError)
 	repoFlag := fs.String("repo", "", "GitHub repository (owner/repo or a github.com URL); see usage")
 	issue := fs.Int("issue", 0, "issue number to solve")
-	githubToken := fs.String("github-token", "", "GitHub token")
+	githubToken := fs.String("github-token", "", "GitHub token (env SHIPYARD_GITHUB_TOKEN, else the token stored by shipyard login)")
 	aiProvider := fs.String("provider", "", "AI provider: openai, xai, or custom")
 	aiEndpoint := fs.String("ai-endpoint", "", "AI endpoint base URL")
 	aiKey := fs.String("ai-key", "", "AI API key")

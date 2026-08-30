@@ -350,6 +350,29 @@ prints an audit line up front:
 In `listen` mode the per-issue line is prefixed like all other output
 (`issue #42: sandbox: …`), and the listener prints one summary line at
 startup.
+## Authentication
+
+Every command that talks to GitHub (`solve`, `listen`, …) resolves the
+token in this order — first non-empty wins:
+
+1. `--github-token` flag
+2. `SHIPYARD_GITHUB_TOKEN` environment variable
+3. the token stored by `shipyard login`
+   (`$XDG_CONFIG_HOME/shipyard/credentials.json`, default
+   `~/.config/shipyard/credentials.json`)
+
+If none of the three is present, the run stops with the usual "missing
+required configuration" error. The small account commands:
+
+```sh
+shipyard whoami    # shows which identity the precedence resolves to (@login),
+                   # plus the stored token's expiry when that metadata exists;
+                   # --github-token / --github-api override token and API root
+shipyard logout    # removes the stored credentials file (clear error if none)
+```
+
+In Docker runs the credentials file lives on the host, so pass the token
+via `SHIPYARD_GITHUB_TOKEN` (or bind-mount the config directory).
 
 ## Configuration
 
@@ -359,7 +382,7 @@ Flags take precedence over environment variables.
 | ----------------- | ------------------------- | -------- | ---------------------------------------------------- |
 | `--repo`          | —                         | yes      | GitHub repository: `owner/repo` or a github.com URL (https/ssh/scp forms) |
 | `--issue`         | —                         | yes      | Issue number to solve                                |
-| `--github-token`  | `SHIPYARD_GITHUB_TOKEN`   | yes      | GitHub token (classic PAT or fine-grained)           |
+| `--github-token`  | `SHIPYARD_GITHUB_TOKEN`   | unless logged in | GitHub token (or the token stored by `shipyard login`; see Authentication) |
 | `--provider`      | `SHIPYARD_AI_PROVIDER`    | no       | AI provider preset: `openai`, `xai`, or `custom` (default `custom`) |
 | `--ai-endpoint`   | `SHIPYARD_AI_ENDPOINT`    | yes for `custom` | AI endpoint base URL; `openai`/`xai` use their preset base URLs |
 | `--ai-key`        | `SHIPYARD_AI_KEY` (also `SHIPYARD_OPENAI_KEY` / `SHIPYARD_XAI_KEY`) | yes for `openai`/`xai` | API key for the AI endpoint |

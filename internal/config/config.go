@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/pefman/Shipyard/internal/auth"
 )
 
 // Environment variables understood by Shipyard. Flags take precedence over
@@ -63,7 +65,9 @@ type Raw struct {
 }
 
 // Load resolves cfg by layering flag values over environment variables.
-// It returns an error if a required value is still missing after merging.
+// The GitHub token additionally falls back to the credentials stored by
+// `shipyard login` (see internal/auth). It returns an error if a required
+// value is still missing after merging.
 func Load(raw Raw) (*Config, error) {
 	provider := strings.ToLower(strings.TrimSpace(firstNonEmpty(raw.Provider, os.Getenv(EnvAIProvider), "custom")))
 	preset, ok := providers[provider]
@@ -75,8 +79,17 @@ func Load(raw Raw) (*Config, error) {
 	key := firstNonEmpty(raw.AIKey, os.Getenv(providerKeyEnv(provider)), os.Getenv(EnvAIKey))
 	model := firstNonEmpty(raw.AIModel, os.Getenv(EnvAIModel), preset.defaultModel)
 
+	// GitHub token precedence: --github-token flag > SHIPYARD_GITHUB_TOKEN
+	// env > token stored by `shipyard login`.
+	githubToken := firstNonEmpty(raw.GitHubToken, os.Getenv(EnvGitHubToken))
+	if githubToken == "" {
+		if stored, ok := auth.LoadStoredAccessToken(); ok {
+			githubToken = stored
+		}
+	}
+
 	cfg := &Config{
-		GitHubToken:   firstNonEmpty(raw.GitHubToken, os.Getenv(EnvGitHubToken)),
+		GitHubToken:   githubToken,
 		AIProvider:    provider,
 		AIEndpoint:    endpoint,
 		AIKey:         key,
@@ -86,7 +99,7 @@ func Load(raw Raw) (*Config, error) {
 
 	var missing []string
 	if cfg.GitHubToken == "" {
-		missing = append(missing, "--github-token or "+EnvGitHubToken)
+		missing = append(missing, "--github-token, "+EnvGitHubToken+", or shipyard login")
 	}
 	if cfg.AIEndpoint == "" {
 		missing = append(missing, "--ai-endpoint or "+EnvAIEndpoint)
