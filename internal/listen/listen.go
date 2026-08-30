@@ -39,7 +39,9 @@ type Options struct {
 	Interval time.Duration
 
 	// Labels restricts a pass to issues carrying at least one of these
-	// labels (e.g. "shipyard"). Empty means every open issue.
+	// labels (e.g. "shipyard"). Empty means every open issue. Matching
+	// is case-insensitive, the shared guardrails rule, so solve and
+	// listen agree on what an allowed label means.
 	Labels []string
 
 	// Base is the branch fixes are based on, passed through to the
@@ -142,6 +144,13 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 	}
 
 	log := d.log()
+	// The label filter is the label allowlist itself; matching is the
+	// shared, case-insensitive guardrails rule so solve and listen
+	// agree on what an allowed label means.
+	labelAllow, err := guardrails.NewAllow(nil, o.Labels)
+	if err != nil {
+		return nil, err
+	}
 	state, err := LoadState(stateFile(o.StateFile))
 	if err != nil {
 		return nil, err
@@ -162,7 +171,7 @@ func (d *Deps) RunOnce(ctx context.Context, o Options) (*PassOutcome, error) {
 			log("pull request cap reached (%d of %d): no more issues are picked up this pass", cap.Count(), cap.Max())
 			break
 		}
-		if !matchesLabels(issue.Labels, o.Labels) {
+		if !labelAllow.LabelsAllowed(issue.Labels) {
 			continue
 		}
 		out.Seen++
@@ -375,23 +384,6 @@ func (d *Deps) saveState(o Options, state *State, log func(format string, args .
 	if err := state.Save(stateFile(o.StateFile)); err != nil {
 		log("warning: could not save the state file: %v", err)
 	}
-}
-
-// matchesLabels reports whether the issue matches the filter: every
-// label in wanted must... no — the issue matches when it carries at
-// least one of wanted; an empty filter matches everything.
-func matchesLabels(issueLabels, wanted []string) bool {
-	if len(wanted) == 0 {
-		return true
-	}
-	for _, have := range issueLabels {
-		for _, want := range wanted {
-			if have == want {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func orNone(s string) string {

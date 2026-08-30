@@ -13,7 +13,6 @@ import (
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
-	"github.com/pefman/Shipyard/internal/guardrails"
 	"github.com/pefman/Shipyard/internal/listen"
 	"github.com/pefman/Shipyard/internal/repo"
 )
@@ -27,7 +26,38 @@ func (s *stringFlag) Set(v string) error {
 	return nil
 }
 
+// listenRun is the result of prepareListen: the resolved collaborators
+// and loop options, ready to hand to listen.Deps.Run.
+type listenRun struct {
+	GitHub  *githubclient.Client
+	AI      *aiclient.Client
+	Options listen.Options
+}
+
 func runListen(args []string) error {
+	prepare, err := prepareListen(args)
+	if err != nil {
+		return err
+	}
+
+	// Graceful shutdown: SIGINT/SIGTERM cancel the context, the current
+	// issue finishes (or is aborted mid-solve), and Run returns.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger := log.New(os.Stderr, "shipyard: ", log.LstdFlags|log.Lmsgprefix)
+	return (&listen.Deps{
+		GitHub: prepare.GitHub,
+		AI:     prepare.AI,
+		Log:    logger.Printf,
+	}).Run(ctx, prepare.Options)
+}
+
+// prepareListen parses the listen flags and resolves configuration and
+// guardrails without touching the network, so the mapping from flags and
+// environment to listen.Options is directly testable: whatever ends up
+// in Options is exactly what the loop's own guardrail gate sees.
+func prepareListen(args []string) (*listenRun, error) {
 	fs := flag.NewFlagSet("listen", flag.ExitOnError)
 	repoFlag := fs.String("repo", "", "GitHub repository to watch (owner/repo or a github.com URL); see usage")
 	interval := fs.Duration("interval", listen.DefaultInterval, "delay between poll passes")
@@ -38,7 +68,7 @@ func runListen(args []string) error {
 	aiProvider := fs.String("provider", "", "AI provider: openai, xai, or custom")
 	aiEndpoint := fs.String("ai-endpoint", "", "AI endpoint base URL")
 	aiKey := fs.String("ai-key", "", "AI API key")
-	aiModel := fs.String("ai-model", "", "model name sent to the endpoint")
+	aiModel := fs.String("ai-model", "", "model name for the AI endpoint")
 	base := fs.String("base", "", "base branch for fixes (default: the repo's default branch)")
 	gitURL := fs.String("git-url", "", "git clone URL for the per-issue checkout (default from the API)")
 	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
@@ -49,38 +79,45 @@ func runListen(args []string) error {
 	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
 	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return nil, err
 	}
 
 	if *repoFlag == "" {
-		return fmt.Errorf("--repo is required: owner/repo, a https://github.com/… URL, or git@github.com:owner/repo")
+		return nil, fmt.Errorf("--repo is required: owner/repo, a https://github.com/… URL, or git@github.com:owner/repo")
 	}
 	owner, name, err := repo.Normalize(*repoFlag)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	runMaxPRs := 0
-	if _, runMaxPRs, err = applyGuardrails(guardrailInput{
+
+	// The label allowlist is the union of --labels/SHIPYARD_LABELS and
+	// the repeatable --label flag; it both guards the run and filters
+	// it, so both must reach the guardrail gate as one list.
+	labelValue := *labelsStr
+	if labelValue == "" {
+		labelValue = os.Getenv(envLabels)
+	}
+	if joined := strings.Join(*label, ","); joined != "" {
+		if labelValue != "" {
+			labelValue += "," + joined
+		} else {
+			labelValue = joined
+		}
+	}
+
+	allow, runMaxPRs, err := applyGuardrails(guardrailInput{
 		reposFlag:  *repos,
-		labelsFlag: *labelsStr,
+		labelsFlag: labelValue,
 		maxPRsFlag: *maxPRs,
 		unguarded:  *unguarded,
 		owner:      owner,
 		repo:       name,
 		dryRun:     *dryRun,
 		quiet:      true,
-	}); err != nil {
-		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	// The label allowlist is the union of --labels/SHIPYARD_LABELS and
-	// the repeatable --label flag; listen solves only issues matching
-	// it, which is the guardrail the allowlist names.
-	allLabels := guardrails.ParseList(*labelsStr)
-	if *labelsStr == "" {
-		allLabels = guardrails.ParseList(os.Getenv("SHIPYARD_LABELS"))
-	}
-	allLabels = append(allLabels, *label...)
 
 	cfg, err := config.Load(config.Raw{
 		GitHubToken: *githubToken,
@@ -90,7 +127,7 @@ func runListen(args []string) error {
 		AIModel:     *aiModel,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var files []string
@@ -100,34 +137,23 @@ func runListen(args []string) error {
 		}
 	}
 
-	ai := aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey, cfg.AIModel)
-
-	// Graceful shutdown: SIGINT/SIGTERM cancel the context, the current
-	// issue finishes (or is aborted mid-solve), and Run returns.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	logger := log.New(os.Stderr, "shipyard: ", log.LstdFlags|log.Lmsgprefix)
-	if err := (&listen.Deps{
+	return &listenRun{
 		GitHub: githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken),
-		AI:     ai,
-		Log:    logger.Printf,
-	}).Run(ctx, listen.Options{
-		Owner:        owner,
-		Repo:         name,
-		StateFile:    *stateFile,
-		Interval:     *interval,
-		Labels:       allLabels,
-		Repos:        guardrails.ParseList(*repos),
-		MaxPRs:       runMaxPRs,
-		Unguarded:    *unguarded,
-		Base:         *base,
-		GitURL:       *gitURL,
-		IncludeFiles: files,
-		Image:        *image,
-		DryRun:       *dryRun,
-	}); err != nil {
-		return err
-	}
-	return nil
+		AI:     aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey, cfg.AIModel),
+		Options: listen.Options{
+			Owner:        owner,
+			Repo:         name,
+			StateFile:    *stateFile,
+			Interval:     *interval,
+			Labels:       allow.Labels,
+			Repos:        allow.Repos,
+			MaxPRs:       runMaxPRs,
+			Unguarded:    *unguarded,
+			Base:         *base,
+			GitURL:       *gitURL,
+			IncludeFiles: files,
+			Image:        *image,
+			DryRun:       *dryRun,
+		},
+	}, nil
 }

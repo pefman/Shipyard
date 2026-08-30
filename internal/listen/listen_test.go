@@ -281,6 +281,25 @@ func TestRunOnceLabelFilter(t *testing.T) {
 	gh.mu.Unlock()
 }
 
+// TestRunOnceLabelFilterCaseInsensitive: the loop's label filter uses
+// the shared guardrails matching, so a case-different entry behaves
+// like on solve: --labels BUG matches an issue labelled "bug".
+func TestRunOnceLabelFilterCaseInsensitive(t *testing.T) {
+	gh := newFakeGitHub(t, testIssues)
+	d := newTestDeps(t, gh, fakeGit{})
+
+	out, err := d.RunOnce(context.Background(), Options{
+		Owner: "towner", Repo: "trepo", StateFile: filepath.Join(t.TempDir(), "state.json"),
+		Labels: []string{"BUG"},
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if out.Seen != 1 || out.New != 1 {
+		t.Errorf("outcome = %+v, want Seen=1 New=1 (bug matched case-insensitively)", out)
+	}
+}
+
 // TestRunOnceSeedsStateFromExistingPR: a lost state file must not make
 // the listener re-solve an issue that already has a pull request on
 // its fix branch.
