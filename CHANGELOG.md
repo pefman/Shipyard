@@ -4,6 +4,27 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Added (SHI-18)
+
+- Guardrails for safe unattended operation, on both `solve` and
+  `listen`:
+  - `--repos` (env `SHIPYARD_REPOS`), a comma-separated `owner/repo`
+    allowlist, and `--labels` (env `SHIPYARD_LABELS`), a label
+    allowlist. When either is set, only issues in allowed repos
+    carrying an allowed label are solved; `listen` additionally
+    refuses to start on a repo that is not on the list. On `listen`,
+    the repeatable `--label` flag is an equivalent label allowlist.
+  - `--max-prs <n>` (env `SHIPYARD_MAX_PRS`, default 3): a hard
+    per-run budget. When the budget is spent, `listen` stops the run
+    with a clean exit and a summary; the issues it did not get to stay
+    open for a later run. `--max-prs 0` is a dry-run setting, not a
+    live one.
+  - `--i-know-this-is-unguarded`: a run with neither allowlist set is
+    unguarded — it may act on any issue in the repository — and is
+    refused unless this flag acknowledges the risk. Guarded runs print
+    a `shipyard: guardrails: …; max-prs: N` audit line at startup; a
+    dry run never counts against the pull-request budget.
+
 ### Added (SHI-33)
 
 - `solve` and `listen` now run the fix step — applying the AI's patch,

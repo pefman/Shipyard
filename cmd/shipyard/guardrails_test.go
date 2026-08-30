@@ -1,0 +1,92 @@
+package main
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/pefman/Shipyard/internal/guardrails"
+)
+
+// TestApplyGuardrailsResolution covers the flag-wins-over-environment
+// rule and the environment fallbacks for the guardrail settings.
+func TestApplyGuardrailsResolution(t *testing.T) {
+	t.Setenv("SHIPYARD_REPOS", "")
+	t.Setenv("SHIPYARD_LABELS", "")
+	t.Setenv("SHIPYARD_MAX_PRS", "")
+
+	g := guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true, maxPRsFlag: -1}
+
+	// Neither flag nor environment: unguarded, so without the
+	// acknowledgment flag it is refused even though a dry run would not
+	// open anything — the flag is how the operator takes responsibility.
+	if _, max, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true, unguarded: true, maxPRsFlag: -1}); err != nil {
+		t.Fatalf("unguarded run acknowledged with the flag: %v", err)
+	} else if max != 3 {
+		t.Errorf("max-prs = %d, want the default 3", max)
+	}
+	// Without the flag the same configuration is refused.
+	_, _, err := applyGuardrails(guardrailInput{owner: "towner", repo: "trepo", dryRun: true, quiet: true})
+	if !errors.Is(err, guardrails.ErrUnguarded) {
+		t.Fatalf("unguarded run without the flag: %v, want the unguarded refusal", err)
+	}
+
+	// Environment fallbacks.
+	t.Setenv("SHIPYARD_REPOS", "towner/trepo")
+	allow, _, err := applyGuardrails(g)
+	if err != nil {
+		t.Fatalf("repos from env: %v", err)
+	}
+	if !allow.RepoAllowed("towner", "trepo") || allow.RepoAllowed("other", "repo") {
+		t.Errorf("env repo allowlist not applied: %v", allow.Repos)
+	}
+
+	// The flag wins over the environment.
+	t.Setenv("SHIPYARD_LABELS", "env-label")
+	allow, _, err = applyGuardrails(guardrailInput{labelsFlag: "flag-label", owner: "towner", repo: "trepo", dryRun: true, quiet: true})
+	if err != nil {
+		t.Fatalf("labels flag over env: %v", err)
+	}
+	if len(allow.Labels) != 1 || allow.Labels[0] != "flag-label" {
+		t.Errorf("Labels = %v, want [flag-label] (flag wins over SHIPYARD_LABELS)", allow.Labels)
+	}
+
+	// The pull-request budget: flag, then env, then the default.
+	t.Setenv("SHIPYARD_MAX_PRS", "7")
+	if _, max, err := applyGuardrails(g); err != nil || max != 7 {
+		t.Errorf("max-prs from env = (%d, %v), want 7", max, err)
+	}
+	if _, max, err := applyGuardrails(guardrailInput{maxPRsFlag: 2, owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err != nil || max != 2 {
+		t.Errorf("max-prs flag over env = (%d, %v), want 2", max, err)
+	}
+
+	// A malformed SHIPYARD_MAX_PRS is a configuration error.
+	t.Setenv("SHIPYARD_MAX_PRS", "three")
+	if _, _, err := applyGuardrails(g); err == nil {
+		t.Error("malformed SHIPYARD_MAX_PRS: expected an error")
+	}
+
+	// A live run with a zero budget is refused.
+	t.Setenv("SHIPYARD_MAX_PRS", "")
+	if _, _, err := applyGuardrails(guardrailInput{maxPRsFlag: 0, owner: "towner", repo: "trepo", dryRun: false, quiet: true}); err == nil {
+		t.Error("live run with --max-prs 0: expected an error")
+	}
+}
+
+// TestApplyGuardrailsRepoGate: the target repo must be on the repo
+// allowlist, from flag or environment.
+func TestApplyGuardrailsRepoGate(t *testing.T) {
+	t.Setenv("SHIPYARD_REPOS", "")
+	t.Setenv("SHIPYARD_LABELS", "")
+	t.Setenv("SHIPYARD_MAX_PRS", "")
+
+	if _, _, err := applyGuardrails(guardrailInput{reposFlag: "other/repo", owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err == nil {
+		t.Error("a repo outside the allowlist: expected an error")
+	}
+	if _, _, err := applyGuardrails(guardrailInput{reposFlag: "towner/trepo", owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err != nil {
+		t.Errorf("a repo on the allowlist: %v, want nil", err)
+	}
+	// Invalid allowlist entries are a configuration error.
+	if _, _, err := applyGuardrails(guardrailInput{reposFlag: "justowner", owner: "towner", repo: "trepo", dryRun: true, quiet: true}); err == nil {
+		t.Error("an invalid repo allowlist entry: expected an error")
+	}
+}

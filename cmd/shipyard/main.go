@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/guardrails"
 	"github.com/pefman/Shipyard/internal/repo"
 	"github.com/pefman/Shipyard/internal/solve"
 )
@@ -79,6 +81,24 @@ Solve flags:
                          auto-detected from the repository — see the README)
   --dry-run              Stop after applying the patch: no commit, push, or PR
 
+Guardrails (solve and listen):
+  --repos <list>         Comma-separated repository allowlist, owner/repo entries
+                         (env SHIPYARD_REPOS). When set, only issues in these
+                         repos are solved.
+  --labels <list>        Comma-separated label allowlist (env SHIPYARD_LABELS).
+                         When set, only issues carrying an allowed label are
+                         solved. (listen: the repeatable --label flag is an
+                         equivalent label allowlist)
+  --max-prs <n>          Stop the run after this many pull requests have been
+                         opened (env SHIPYARD_MAX_PRS; default 3). A live run
+                         must be able to open at least one: --max-prs 0 is a
+                         dry-run setting, not a live one.
+  --i-know-this-is-unguarded
+                         Proceed even though no --repos/--labels allowlist is
+                         set. With neither allowlist set a run is unguarded —
+                         it may act on any issue in the repository — and is
+                         refused unless this flag is passed.
+
 Listen flags:
   --repo <repo>          GitHub repository to watch (required; accepted forms
                          like solve's --repo)
@@ -128,6 +148,10 @@ func runSolve(args []string) error {
 	gitURL := fs.String("git-url", "", "git clone URL (with --workdir unset)")
 	dryRun := fs.Bool("dry-run", false, "stop after applying the patch: no commit, push, or PR")
 	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
+	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
+	labels := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS)")
+	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
+	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -139,6 +163,19 @@ func runSolve(args []string) error {
 		return fmt.Errorf("--issue <n> is required")
 	}
 	owner, name, err := repo.Normalize(*repoFlag)
+	if err != nil {
+		return err
+	}
+	allow, _, err := applyGuardrails(guardrailInput{
+		reposFlag:  *repos,
+		labelsFlag: *labels,
+		maxPRsFlag: *maxPRs,
+		unguarded:  *unguarded,
+		owner:      owner,
+		repo:       name,
+		issue:      *issue,
+		dryRun:     *dryRun,
+	})
 	if err != nil {
 		return err
 	}
@@ -162,9 +199,21 @@ func runSolve(args []string) error {
 	}
 
 	ai := aiclient.NewClient(cfg.AIEndpoint, cfg.AIKey, cfg.AIModel)
+	gh := githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken)
+	// With a label allowlist, the target issue must carry one of the
+	// allowed labels; check it before spending an AI call on it.
+	if len(allow.Labels) > 0 {
+		iss, err := gh.GetIssue(context.Background(), owner, name, *issue)
+		if err != nil {
+			return fmt.Errorf("checking the labels of issue #%d: %w", *issue, err)
+		}
+		if !allow.LabelsAllowed(iss.Labels) {
+			return fmt.Errorf("issue #%d carries no allowed label (allowed: %s)", *issue, strings.Join(allow.Labels, ", "))
+		}
+	}
 
 	res, err := solve.Solve(context.Background(), solve.Deps{
-		GitHub: githubclient.NewClient(cfg.GitHubAPIRoot, cfg.GitHubToken),
+		GitHub: gh,
 		AI:     ai,
 	}, solve.Options{
 		Owner:        owner,
@@ -196,4 +245,77 @@ func runSolve(args []string) error {
 		fmt.Println(res.PatchPath)
 	}
 	return nil
+}
+
+// guardrailInput bundles the guardrail settings of one command run: the
+// flag values (an empty flag falls back to the environment), the target
+// repo and issue, and the run mode.
+type guardrailInput struct {
+	reposFlag  string // SHIPYARD_REPOS
+	labelsFlag string // SHIPYARD_LABELS
+	maxPRsFlag int    // SHIPYARD_MAX_PRS; negative means unset
+	unguarded  bool   // --i-know-this-is-unguarded
+	owner      string
+	repo       string
+	issue      int // issue to solve (solve); unused by listen
+	dryRun     bool
+	quiet      bool // don't print the audit line (listen logs its own)
+}
+
+const (
+	envRepos  = "SHIPYARD_REPOS"
+	envLabels = "SHIPYARD_LABELS"
+	envMaxPRs = "SHIPYARD_MAX_PRS"
+)
+
+// applyGuardrails resolves the allowlists and the pull-request budget
+// (flag wins over environment), refuses a run that is unguarded — no
+// repo or label allowlist without --i-know-this-is-unguarded — and
+// checks the target repo against the repo allowlist. It prints the
+// audit line (or the unguarded warning) to stderr and returns the
+// parsed allowlist plus the resolved pull-request budget.
+func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
+	repos := g.reposFlag
+	if repos == "" {
+		repos = os.Getenv(envRepos)
+	}
+	labels := g.labelsFlag
+	if labels == "" {
+		labels = os.Getenv(envLabels)
+	}
+	allow, err := guardrails.NewAllow(guardrails.ParseList(repos), guardrails.ParseList(labels))
+	if err != nil {
+		return nil, 0, err
+	}
+
+	maxPRs := g.maxPRsFlag
+	if maxPRs < 0 {
+		if env := os.Getenv(envMaxPRs); env != "" {
+			if maxPRs, err = guardrails.ParseMaxPRs(env); err != nil {
+				return nil, 0, err
+			}
+		}
+	}
+	if maxPRs < 0 {
+		maxPRs = guardrails.DefaultMaxPRs
+	}
+	if maxPRs == 0 && !g.dryRun {
+		return nil, 0, errors.New("--max-prs is 0: a live run would never open a pull request; use --dry-run or raise the cap")
+	}
+
+	if !allow.RepoAllowed(g.owner, g.repo) {
+		return nil, 0, fmt.Errorf("repo %s/%s is not in the repo allowlist (%s)", g.owner, g.repo, strings.Join(allow.Repos, ", "))
+	}
+	if err := allow.Gate(g.unguarded); err != nil {
+		return nil, 0, err
+	}
+	if g.quiet {
+		return allow, maxPRs, nil
+	}
+	if allow.Configured() {
+		fmt.Fprintf(os.Stderr, "shipyard: guardrails: %s; max-prs: %d\n", allow.Summary(), maxPRs)
+	} else {
+		fmt.Fprintln(os.Stderr, "shipyard: WARNING: no repo or label allowlist is set — this run is UNGUARDED (acknowledged with --i-know-this-is-unguarded) and may act on any issue in the repository.")
+	}
+	return allow, maxPRs, nil
 }

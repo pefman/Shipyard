@@ -13,6 +13,7 @@ import (
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/guardrails"
 	"github.com/pefman/Shipyard/internal/listen"
 	"github.com/pefman/Shipyard/internal/repo"
 )
@@ -30,8 +31,8 @@ func runListen(args []string) error {
 	fs := flag.NewFlagSet("listen", flag.ExitOnError)
 	repoFlag := fs.String("repo", "", "GitHub repository to watch (owner/repo or a github.com URL); see usage")
 	interval := fs.Duration("interval", listen.DefaultInterval, "delay between poll passes")
-	labels := &stringFlag{}
-	fs.Var(labels, "label", "only solve issues carrying this label (repeatable)")
+	label := &stringFlag{}
+	fs.Var(label, "label", "only solve issues carrying this label (repeatable)")
 	stateFile := fs.String("state-file", listen.DefaultStateFile, "file tracking processed issues")
 	githubToken := fs.String("github-token", "", "GitHub token")
 	aiProvider := fs.String("provider", "", "AI provider: openai, xai, or custom")
@@ -43,6 +44,10 @@ func runListen(args []string) error {
 	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
 	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
 	dryRun := fs.Bool("dry-run", false, "apply patches but commit nothing and open no pull requests")
+	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
+	labelsStr := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS; --label is an equivalent flag)")
+	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
+	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -54,6 +59,28 @@ func runListen(args []string) error {
 	if err != nil {
 		return err
 	}
+	runMaxPRs := 0
+	if _, runMaxPRs, err = applyGuardrails(guardrailInput{
+		reposFlag:  *repos,
+		labelsFlag: *labelsStr,
+		maxPRsFlag: *maxPRs,
+		unguarded:  *unguarded,
+		owner:      owner,
+		repo:       name,
+		dryRun:     *dryRun,
+		quiet:      true,
+	}); err != nil {
+		return err
+	}
+
+	// The label allowlist is the union of --labels/SHIPYARD_LABELS and
+	// the repeatable --label flag; listen solves only issues matching
+	// it, which is the guardrail the allowlist names.
+	allLabels := guardrails.ParseList(*labelsStr)
+	if *labelsStr == "" {
+		allLabels = guardrails.ParseList(os.Getenv("SHIPYARD_LABELS"))
+	}
+	allLabels = append(allLabels, *label...)
 
 	cfg, err := config.Load(config.Raw{
 		GitHubToken: *githubToken,
@@ -90,7 +117,10 @@ func runListen(args []string) error {
 		Repo:         name,
 		StateFile:    *stateFile,
 		Interval:     *interval,
-		Labels:       *labels,
+		Labels:       allLabels,
+		Repos:        guardrails.ParseList(*repos),
+		MaxPRs:       runMaxPRs,
+		Unguarded:    *unguarded,
 		Base:         *base,
 		GitURL:       *gitURL,
 		IncludeFiles: files,
