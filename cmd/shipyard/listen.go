@@ -79,7 +79,8 @@ func prepareListen(args []string) (*listenRun, error) {
 	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
 	labelsStr := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS; --label is an equivalent flag)")
 	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
-	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set (live runs)")
+	all := fs.Bool("all", false, "run with no repo/label allowlist, on purpose (explicitly unrestricted)")
+	unguarded := fs.Bool("i-know-this-is-unguarded", false, "hidden alias of --all: proceed even with no repo/label allowlist set (live runs)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -120,6 +121,7 @@ func prepareListen(args []string) (*listenRun, error) {
 		reposFlag:  *repos,
 		labelsFlag: labelValue,
 		maxPRsFlag: *maxPRs,
+		all:        *all,
 		unguarded:  *unguarded,
 		owner:      owner,
 		repo:       name,
@@ -160,6 +162,7 @@ func prepareListen(args []string) (*listenRun, error) {
 			Repos:        allow.Repos,
 			MaxPRs:       runMaxPRs,
 			Unguarded:    *unguarded,
+			All:          *all,
 			Base:         *base,
 			GitURL:       *gitURL,
 			IncludeFiles: files,

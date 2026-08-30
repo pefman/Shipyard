@@ -36,7 +36,7 @@ Live runs are bounded by allowlists and a per-run pull-request budget:
 | Repo allowlist | `--repos owner/repo,…` | `SHIPYARD_REPOS` | Only issues in these repositories are solved; `listen` refuses to start on a repo outside the list |
 | Label allowlist | `--labels a,b` (on `listen` the repeatable `--label` is equivalent) | `SHIPYARD_LABELS` | Only issues carrying at least one allowed label are solved |
 | Pull-request budget | `--max-prs 5` | `SHIPYARD_MAX_PRS` | Hard per-run cap (default 3): after N pull requests the run exits cleanly with a summary, and issues it did not get to stay open for a later run. `--max-prs 0` is a dry-run setting, not a live one |
-| Unguarded acknowledgment | `--i-know-this-is-unguarded` | — | A live run with **no repo or label allowlist set is refused** unless this flag acknowledges the risk: an unguarded run may act on any issue in the repository |
+| Unguarded acknowledgment | `--all` | — | A live run with **no repo or label allowlist set is refused** unless this flag marks the allowlist axis as explicitly unrestricted — "no allowlist, on purpose" (the audit line then reads `guardrails: NONE (explicit --all)`, and `--all` conflicts with a set `--repos`/`--labels` allowlist). The hidden flag `--i-know-this-is-unguarded` remains a compatible alias |
 
 The gate applies to both commands: `listen` in live mode, and `solve`,
 which runs live unless you pass `--dry-run`. Dry runs need no allowlist
@@ -374,7 +374,7 @@ Flags take precedence over environment variables.
 | `--repos`         | `SHIPYARD_REPOS`          | no       | Comma-separated `owner/repo` allowlist (solve + listen; see [Safety](#safety)) |
 | `--labels`        | `SHIPYARD_LABELS`         | no       | Comma-separated label allowlist (solve + listen; on `listen` the repeatable `--label` is an equivalent flag) |
 | `--max-prs`       | `SHIPYARD_MAX_PRS`        | no       | Stop the run after this many pull requests (default 3; `0` = open none — a dry-run setting) |
-| `--i-know-this-is-unguarded` | —              | no       | Proceed with a live run even though no `--repos`/`--labels` allowlist is set (see [Safety](#safety)) |
+| `--all`             | —                         | no       | Run with no `--repos`/`--labels` allowlist, on purpose: the axis is explicitly unrestricted (hidden alias `--i-know-this-is-unguarded`; see [Safety](#safety)) |
 
 `SHIPYARD_GITHUB_API` (env only) overrides the GitHub API base URL
 (default `https://api.github.com`); useful against GHE or in tests.

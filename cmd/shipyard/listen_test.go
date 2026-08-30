@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/pefman/Shipyard/internal/guardrails"
@@ -132,6 +133,34 @@ func TestPrepareListenUnguardedLiveRefused(t *testing.T) {
 	t.Setenv("SHIPYARD_MODE", "")
 	if _, err := prepareListen([]string{"--repo", "towner/trepo"}); err != nil {
 		t.Fatalf("prepareListen back in the dry-run default: %v, want the run to proceed", err)
+	}
+}
+
+// TestPrepareListenExplicitAll: --all starts a live run with no
+// allowlist (the run is deliberately unguarded, on purpose), and it is
+// a configuration error combined with any allowlist source: --repos,
+// --labels, or the repeatable --label.
+func TestPrepareListenExplicitAll(t *testing.T) {
+	resetGuardrailEnv(t)
+
+	run, err := prepareListen([]string{"--repo", "towner/trepo", "--live", "--all"})
+	if err != nil {
+		t.Fatalf("prepareListen with --live --all: %v, want the run to start", err)
+	}
+	if !run.Options.All {
+		t.Error("Options.All = false, want --all to reach the loop")
+	}
+	if run.Options.Unguarded {
+		t.Error("--all must not be folded into the hidden alias's option")
+	}
+	for _, args := range [][]string{
+		{"--repo", "towner/trepo", "--live", "--all", "--repos", "towner/trepo"},
+		{"--repo", "towner/trepo", "--live", "--all", "--labels", "bug"},
+		{"--repo", "towner/trepo", "--live", "--all", "--label", "bug"},
+	} {
+		if _, err := prepareListen(args); err == nil || !strings.Contains(err.Error(), "conflict") {
+			t.Errorf("prepareListen %v = %v, want the --all/allowlist conflict", args, err)
+		}
 	}
 }
 
