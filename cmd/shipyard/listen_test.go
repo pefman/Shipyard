@@ -14,6 +14,7 @@ func resetGuardrailEnv(t *testing.T) {
 	t.Setenv(envRepos, "")
 	t.Setenv(envLabels, "")
 	t.Setenv(envMaxPRs, "")
+	t.Setenv("SHIPYARD_MODE", "")
 	t.Setenv("SHIPYARD_GITHUB_TOKEN", "gh-test-token")
 	t.Setenv("SHIPYARD_AI_ENDPOINT", "http://127.0.0.1:1/v1")
 }
@@ -93,15 +94,85 @@ func TestPrepareListenLabelsUnionEnvAndFlag(t *testing.T) {
 	}
 }
 
-// TestPrepareListenUnguardedRefused: with no allowlist anywhere and no
-// acknowledgment flag, preparation itself refuses the run.
-func TestPrepareListenUnguardedRefused(t *testing.T) {
+// TestPrepareListenDryRunDefaultIsSafe: with no allowlist anywhere, the
+// default listen run is a dry run and must start — a fresh installation
+// pointed at a repo must not open pull requests until the operator
+// deliberately goes live.
+func TestPrepareListenDryRunDefaultIsSafe(t *testing.T) {
 	resetGuardrailEnv(t)
 
-	if _, err := prepareListen([]string{"--repo", "towner/trepo"}); !errors.Is(err, guardrails.ErrUnguarded) {
-		t.Fatalf("prepareListen = %v, want the unguarded refusal", err)
+	run, err := prepareListen([]string{"--repo", "towner/trepo"})
+	if err != nil {
+		t.Fatalf("prepareListen with no allowlists: %v, want the dry-run default to start", err)
 	}
-	if _, err := prepareListen([]string{"--repo", "towner/trepo", "--i-know-this-is-unguarded"}); err != nil {
-		t.Fatalf("prepareListen with the flag: %v, want the run to proceed", err)
+	if !run.Options.DryRun {
+		t.Error("Options.DryRun = false, want the dry-run default")
+	}
+	if run.Options.Unguarded {
+		t.Error("a dry run must not need the unguarded acknowledgment")
+	}
+}
+
+// TestPrepareListenUnguardedLiveRefused: going live without a repo or
+// label allowlist is refused, via the --live flag or SHIPYARD_MODE=live,
+// unless the operator acknowledges it.
+func TestPrepareListenUnguardedLiveRefused(t *testing.T) {
+	resetGuardrailEnv(t)
+
+	if _, err := prepareListen([]string{"--repo", "towner/trepo", "--live"}); !errors.Is(err, guardrails.ErrUnguarded) {
+		t.Fatalf("prepareListen with --live: %v, want the unguarded refusal", err)
+	}
+	t.Setenv("SHIPYARD_MODE", "live")
+	if _, err := prepareListen([]string{"--repo", "towner/trepo"}); !errors.Is(err, guardrails.ErrUnguarded) {
+		t.Fatalf("prepareListen with SHIPYARD_MODE=live: %v, want the unguarded refusal", err)
+	}
+	if _, err := prepareListen([]string{"--repo", "towner/trepo", "--live", "--i-know-this-is-unguarded"}); err != nil {
+		t.Fatalf("prepareListen with --live and the flag: %v, want the run to proceed", err)
+	}
+	t.Setenv("SHIPYARD_MODE", "")
+	if _, err := prepareListen([]string{"--repo", "towner/trepo"}); err != nil {
+		t.Fatalf("prepareListen back in the dry-run default: %v, want the run to proceed", err)
+	}
+}
+
+// TestPrepareListenModeResolution: the mapping from --live/--dry-run
+// flags and SHIPYARD_MODE onto the loop's DryRun option (flag wins over
+// environment; --live and --dry-run conflict).
+func TestPrepareListenModeResolution(t *testing.T) {
+	resetGuardrailEnv(t)
+	t.Setenv(envRepos, "towner/trepo") // guarded, so live modes may start
+
+	run, err := prepareListen([]string{"--repo", "towner/trepo", "--live"})
+	if err != nil {
+		t.Fatalf("prepareListen with --live: %v", err)
+	}
+	if run.Options.DryRun {
+		t.Error("--live must land in the loop as a live run")
+	}
+	run, err = prepareListen([]string{"--repo", "towner/trepo", "--dry-run"})
+	if err != nil {
+		t.Fatalf("prepareListen with --dry-run: %v", err)
+	}
+	if !run.Options.DryRun {
+		t.Error("--dry-run must land in the loop as a dry run")
+	}
+	t.Setenv("SHIPYARD_MODE", "live")
+	run, err = prepareListen([]string{"--repo", "towner/trepo"})
+	if err != nil {
+		t.Fatalf("prepareListen with SHIPYARD_MODE=live: %v", err)
+	}
+	if run.Options.DryRun {
+		t.Error("SHIPYARD_MODE=live must land in the loop as a live run")
+	}
+	// The flag wins over the environment.
+	run, err = prepareListen([]string{"--repo", "towner/trepo", "--dry-run"})
+	if err != nil {
+		t.Fatalf("prepareListen with --dry-run over live env: %v", err)
+	}
+	if !run.Options.DryRun {
+		t.Error("the --dry-run flag must beat SHIPYARD_MODE=live")
+	}
+	if _, err := prepareListen([]string{"--repo", "towner/trepo", "--live", "--dry-run"}); err == nil {
+		t.Error("--live and --dry-run together: expected an error")
 	}
 }

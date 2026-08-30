@@ -179,3 +179,53 @@ func TestParseMaxPRs(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMode(t *testing.T) {
+	for value, want := range map[string]Mode{"live": ModeLive, " Live ": ModeLive, "DRY-RUN": ModeDryRun} {
+		if got, err := ParseMode(value); err != nil || got != want {
+			t.Errorf("ParseMode(%q) = (%v, %v), want (%v, nil)", value, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "  ", "production", "dryrun"} {
+		if _, err := ParseMode(bad); err == nil {
+			t.Errorf("ParseMode(%q): expected an error", bad)
+		}
+	}
+}
+
+func TestResolveMode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		live    bool
+		dryRun  bool
+		modeEnv string
+		def     Mode
+		want    Mode
+		wantErr bool
+	}{
+		{name: "listen default: dry-run", def: ModeDryRun, want: ModeDryRun},
+		{name: "solve default: live", def: ModeLive, want: ModeLive},
+		{name: "no default means live", want: ModeLive},
+		{name: "--live flag", live: true, def: ModeDryRun, want: ModeLive},
+		{name: "--dry-run flag", dryRun: true, def: ModeLive, want: ModeDryRun},
+		{name: "live flag beats dry-run env", live: true, modeEnv: "dry-run", def: ModeDryRun, want: ModeLive},
+		{name: "dry-run flag beats live env", dryRun: true, modeEnv: "live", def: ModeLive, want: ModeDryRun},
+		{name: "env live", modeEnv: "live", def: ModeDryRun, want: ModeLive},
+		{name: "env dry-run", modeEnv: "dry-run", def: ModeLive, want: ModeDryRun},
+		{name: "live and dry-run conflict", live: true, dryRun: true, wantErr: true},
+		{name: "invalid env value", modeEnv: "production", def: ModeDryRun, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveMode(tc.live, tc.dryRun, tc.modeEnv, tc.def)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveMode = %v, want an error", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Errorf("ResolveMode = (%v, %v), want (%v, nil)", got, err, tc.want)
+			}
+		})
+	}
+}

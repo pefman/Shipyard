@@ -14,6 +14,16 @@
 #
 #   docker compose --profile listen up -d
 #
+# The listener starts in DRY-RUN mode (the safe default): it runs the
+# full flow but opens no pull requests. To go live, add --live (or
+# SHIPYARD_MODE=live) plus an allowlist — a live run without
+# --repos/SHIPYARD_REPOS or --labels/SHIPYARD_LABELS is refused unless
+# you also pass --i-know-this-is-unguarded:
+#
+#   SHIPYARD_REPOS=owner/repo docker compose --profile listen up -d
+#   (and add --live after the command, e.g.
+#   command: ["listen", "--repo", "owner/repo", "--live", ...])
+#
 # The listener keeps a state file in /data so already-processed issues
 # survive container restarts.
 

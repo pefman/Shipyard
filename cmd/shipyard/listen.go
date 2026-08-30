@@ -13,6 +13,7 @@ import (
 	"github.com/pefman/Shipyard/internal/aiclient"
 	"github.com/pefman/Shipyard/internal/config"
 	"github.com/pefman/Shipyard/internal/githubclient"
+	"github.com/pefman/Shipyard/internal/guardrails"
 	"github.com/pefman/Shipyard/internal/listen"
 	"github.com/pefman/Shipyard/internal/repo"
 )
@@ -73,14 +74,24 @@ func prepareListen(args []string) (*listenRun, error) {
 	gitURL := fs.String("git-url", "", "git clone URL for the per-issue checkout (default from the API)")
 	includeFiles := fs.String("include-files", "", "comma-separated files to embed in the prompt")
 	image := fs.String("image", "", "sandbox image for the fix step (live runs; default: auto-detect)")
-	dryRun := fs.Bool("dry-run", false, "apply patches but commit nothing and open no pull requests")
+	live := fs.Bool("live", false, "live mode: commit fixes, push, and open pull requests (env SHIPYARD_MODE=live)")
+	dryRun := fs.Bool("dry-run", false, "dry-run mode (the default for listen): apply patches but commit nothing and open no pull requests")
 	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
 	labelsStr := fs.String("labels", "", "label allowlist, comma-separated (env SHIPYARD_LABELS; --label is an equivalent flag)")
 	maxPRs := fs.Int("max-prs", -1, "stop after opening this many pull requests (env SHIPYARD_MAX_PRS; default 3)")
-	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set")
+	unguarded := fs.Bool("i-know-this-is-unguarded", false, "proceed even with no repo/label allowlist set (live runs)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+
+	// Listen is dry-run by default: a fresh installation pointed at a
+	// repo must not start opening pull requests until the operator
+	// deliberately goes live with --live or SHIPYARD_MODE=live.
+	mode, err := guardrails.ResolveMode(*live, *dryRun, os.Getenv(guardrails.EnvMode), guardrails.ModeDryRun)
+	if err != nil {
+		return nil, err
+	}
+	dry := mode == guardrails.ModeDryRun
 
 	if *repoFlag == "" {
 		return nil, fmt.Errorf("--repo is required: owner/repo, a https://github.com/… URL, or git@github.com:owner/repo")
@@ -112,7 +123,7 @@ func prepareListen(args []string) (*listenRun, error) {
 		unguarded:  *unguarded,
 		owner:      owner,
 		repo:       name,
-		dryRun:     *dryRun,
+		dryRun:     dry,
 		quiet:      true,
 	})
 	if err != nil {
@@ -153,7 +164,7 @@ func prepareListen(args []string) (*listenRun, error) {
 			GitURL:       *gitURL,
 			IncludeFiles: files,
 			Image:        *image,
-			DryRun:       *dryRun,
+			DryRun:       dry,
 		},
 	}, nil
 }

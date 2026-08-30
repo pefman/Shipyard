@@ -77,7 +77,9 @@ type Options struct {
 
 	// Unguarded reports that the operator acknowledged an unguarded
 	// run (--i-know-this-is-unguarded): with no repo or label
-	// allowlist set, Run is refused unless this is true.
+	// allowlist set, a live run is refused unless this is true. Dry
+	// runs need no acknowledgment: they commit nothing and open no
+	// pull requests.
 	Unguarded bool
 
 	// PRCap tracks how many pull requests this run has opened; Run
@@ -239,32 +241,46 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 		o.Interval = DefaultInterval
 	}
 
-	// Guardrails: a run with no repo or label allowlist is refused
-	// unless the operator acknowledged it, and the watched repo must
-	// be on the repo allowlist when one is set.
+	// Guardrails: a live run with no repo or label allowlist is
+	// refused unless the operator acknowledged it (dry runs are safe
+	// without an allowlist, since they open nothing), and the watched
+	// repo must be on the repo allowlist when one is set.
 	allow, err := guardrails.NewAllow(o.Repos, o.Labels)
 	if err != nil {
 		return err
 	}
-	if err := allow.Gate(o.Unguarded); err != nil {
-		return err
+	if !o.DryRun {
+		if err := allow.Gate(o.Unguarded); err != nil {
+			return err
+		}
 	}
 	if len(o.Repos) > 0 && !allow.RepoAllowed(o.Owner, o.Repo) {
 		return fmt.Errorf("repo %s/%s is not in the repo allowlist (%s): this listener would never solve anything here — point --repo at an allowed repository or remove it from --repos", o.Owner, o.Repo, strings.Join(o.Repos, ", "))
 	}
 
+	// The per-run pull-request budget. Options.MaxPRs <= 0 selects the
+	// default (a zero value from a direct API call must not mean
+	// "open nothing"); an explicit zero cap is still available via a
+	// PRCap installed on Options.PRCap.
+	cap := guardrails.NewPRCap(maxPRsForRun(o.MaxPRs))
+	o.PRCap = cap
+
 	log := d.log()
-	if allow.Configured() {
-		log("guardrails: %s", allow.Summary())
+	// First log line is the mode audit line: in live mode it confirms
+	// the active guardrails (repos, labels, max-prs), so a long-running
+	// container's first line is an audit line.
+	if o.DryRun {
+		log("dry-run mode: patches are applied but nothing is committed, pushed, or opened (pass --live or set SHIPYARD_MODE=live to go live); guardrails: %s", allow.Summary())
+	} else if allow.Configured() {
+		log("live mode: guardrails: %s; max-prs: %d", allow.Summary(), cap.Max())
 	} else {
-		log("WARNING: no repo or label allowlist is set — this run is UNGUARDED (acknowledged with --i-know-this-is-unguarded) and may act on any issue in %s/%s", o.Owner, o.Repo)
+		log("live mode: WARNING: UNGUARDED — no repo or label allowlists (acknowledged with --i-know-this-is-unguarded): this run may act on any issue in %s/%s; max-prs: %d", o.Owner, o.Repo, cap.Max())
 	}
-	log("listening on %s/%s: every %s, state in %s, max %d pull request(s) per run", o.Owner, o.Repo, o.Interval, stateFile(o.StateFile), maxPRsForRun(o.MaxPRs))
+	log("listening on %s/%s: every %s, state in %s", o.Owner, o.Repo, o.Interval, stateFile(o.StateFile))
 	if len(o.Labels) > 0 {
 		log("label filter: %s", strings.Join(o.Labels, ", "))
 	}
 	if o.DryRun {
-		log("dry run: patches are applied but nothing is committed, pushed, or opened")
 		log("sandbox: off (dry-run)")
 	} else {
 		// Startup audit line: whether live fix steps run in a sandbox.
@@ -278,13 +294,6 @@ func (d *Deps) Run(ctx context.Context, o Options) error {
 			log("sandbox: on (image: auto-detected per repository)")
 		}
 	}
-
-	// The per-run pull-request budget. Options.MaxPRs <= 0 selects the
-	// default (a zero value from a direct API call must not mean
-	// "open nothing"); an explicit zero cap is still available via a
-	// PRCap installed on Options.PRCap.
-	cap := guardrails.NewPRCap(maxPRsForRun(o.MaxPRs))
-	o.PRCap = cap
 
 	ticker := time.NewTicker(o.Interval)
 	defer ticker.Stop()

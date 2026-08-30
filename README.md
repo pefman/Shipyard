@@ -13,7 +13,35 @@ go build ./...
 go build -o shipyard ./cmd/shipyard
 ```
 
-## Docker deployment
+## Safety
+
+Shipyard is built to be predictable when unattended: **`listen` is
+dry-run by default**. A fresh installation pointed at a repository runs
+the full flow (issue → AI → patch → apply) but stops before any commit,
+push, or pull request, printing what it would do. Nothing reaches
+GitHub until you deliberately go live:
+
+```sh
+shipyard listen --repo owner/repo --live      # or SHIPYARD_MODE=live
+```
+
+On startup the listener's first log line is an audit line. In live mode
+it confirms the active guardrails — repo/label allowlists
+(`--repos` / `SHIPYARD_REPOS`, `--labels` / `SHIPYARD_LABELS`,
+`--label`) and the pull-request budget (`--max-prs` /
+`SHIPYARD_MAX_PRS`, default 3, so one run can never open more than that
+many pull requests): a long-running container's first line is an audit
+line. A live run with **no repo or label allowlist set is refused**
+unless you acknowledge it with `--i-know-this-is-unguarded`; dry runs
+need no such acknowledgment because they open nothing.
+
+The one-shot `solve` command stays explicit: it always targets the issue
+you name, opens at most one pull request, and `--dry-run` stops it after
+the patch is applied. Compose deployments that want the listener live
+must pass `--live` (or `SHIPYARD_MODE=live`) plus an allowlist on
+purpose.
+
+## Build (Docker)
 
 The repo ships a multi-stage Dockerfile: a full Go toolchain builds a
 static binary (`CGO_ENABLED=0`), and the runtime image is a small Alpine
@@ -81,8 +109,9 @@ docker run -d --name shipyard-listen --restart unless-stopped \
 
 The listener keeps its state file in `/data` (override with
 `--state-file`); mount a volume there so a container restart does not
-re-solve issues. Use `--label` to only solve labeled issues and
-`--dry-run` to apply patches without committing or opening PRs.
+re-solve issues. Use `--label` to only solve labeled issues. The
+listener starts in dry-run mode: add `--live` (and an allowlist — see
+[Safety](#safety)) once you have watched a dry run do what you expect.
 
 Note for live runs while Shipyard itself is in a container: the sandbox
 needs to start containers from inside (see [Sandbox](#sandbox)), so
@@ -175,7 +204,9 @@ answer is always inspectable.
 Listens on a repository: it polls the open issues, runs the same
 solving flow as `solve` on every issue that has not been processed
 yet, and skips the rest. Designed to run unattended (e.g. in a
-container), one long-lived process per repository:
+container), one long-lived process per repository. It starts in
+dry-run mode (see [Safety](#safety)): `--live` or
+`SHIPYARD_MODE=live` enables commits, pushes, and pull requests.
 
 ```sh
 shipyard listen --repo owner/repo
@@ -203,13 +234,17 @@ Behavior notes:
   on a later pass.
 - `SIGINT`/`SIGTERM` shut down gracefully: the in-flight issue finishes
   (or is aborted) and no further issue is picked up.
-- `--dry-run` applies patches but commits nothing and opens no pull
-  requests; state still records the issues (with no PR URL).
+- The default mode is dry-run: patches are applied but nothing is
+  committed and no pull requests are opened; state still records the
+  issues (with no PR URL). Pass `--live` to deliver.
+- In live mode the first log line is the guardrails audit line
+  (allowlists, pull-request budget) so a container's first line is an
+  audit line (see [Safety](#safety)).
 - Every log line is prefixed with the issue number, so a long-running
   listener is easy to follow (`journalctl`, `docker logs`, …).
 
-Useful flags: `--interval 5m` (default `1m`), `--label shipyard`,
-`--base main`, `--git-url`, `--include-files`, `--image`, `--dry-run` —
+Useful flags: `--interval 5m` (default `1m`), `--live`, `--label
+shipyard`, `--base main`, `--git-url`, `--include-files`, `--image` —
 plus the same `--provider` / `--ai-endpoint` / `--ai-key` / `--ai-model`
 configuration as `solve` (the default `custom` provider needs no key,
 so a keyless local endpoint works out of the box).
@@ -284,6 +319,7 @@ Flags take precedence over environment variables.
 | `--include-files` | —                         | no       | Comma-separated repo files to embed in the prompt    |
 | `--git-url`       | —                         | no       | Git clone URL when no `--workdir` is given           |
 | `--dry-run`       | —                         | no       | Stop after applying the patch: no commit/push/PR     |
+| `--live`          | `SHIPYARD_MODE`           | no       | `listen` only: commit, push, and open pull requests (the default for `listen` is dry-run; `solve` is always live by default) |
 
 `SHIPYARD_GITHUB_API` (env only) overrides the GitHub API base URL
 (default `https://api.github.com`); useful against GHE or in tests.
@@ -424,6 +460,7 @@ internal/githubclient  GitHub REST client (repo, issues, pull requests)
 internal/aiclient/     OpenAI-compatible chat completions client
 internal/solve/        the solving flow: prompt → AI → patch → fix step → PR
 internal/sandbox/      ephemeral Docker execution of the fix step (live runs)
+internal/guardrails/   safety contract: allowlists, PR cap, run-mode resolution
 internal/listen/       listen mode: poll open issues, solve new ones
 hack/mockai/           dev-only mock AI endpoint for local end-to-end runs
 Dockerfile             multi-stage image: static binary on Alpine, non-root

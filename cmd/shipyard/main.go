@@ -94,15 +94,22 @@ Guardrails (solve and listen):
                          must be able to open at least one: --max-prs 0 is a
                          dry-run setting, not a live one.
   --i-know-this-is-unguarded
-                         Proceed even though no --repos/--labels allowlist is
-                         set. With neither allowlist set a run is unguarded —
-                         it may act on any issue in the repository — and is
-                         refused unless this flag is passed.
+                         Proceed with a live run even though no --repos/
+                         --labels allowlist is set. With neither allowlist
+                         set a live run is unguarded — it may act on any
+                         issue in the repository — and is refused unless this
+                         flag is passed. Dry runs are safe without an
+                         allowlist: they open nothing.
 
 Listen flags:
   --repo <repo>          GitHub repository to watch (required; accepted forms
                          like solve's --repo)
   --interval <dur>       Delay between poll passes (default 1m)
+  --live                 Live mode: commit fixes, push, and open pull
+                         requests (env SHIPYARD_MODE=live). Without --live,
+                         listen runs in dry-run mode — the default: it runs
+                         the full flow but commits nothing and opens no pull
+                         requests
   --label <name>         Only solve issues carrying this label (repeatable)
   --state-file <path>    File tracking processed issues (default: shipyard-listen-state.json)
   --github-token <t>     GitHub token (env SHIPYARD_GITHUB_TOKEN)
@@ -117,7 +124,9 @@ Listen flags:
   --include-files <list> Comma-separated files to embed in the prompt
   --image <image>        Sandbox image for the fix step (live runs only; default:
                          auto-detected from the repository)
-  --dry-run              Apply patches but commit nothing and open no pull requests
+  --dry-run              Dry-run mode (the default for listen): apply patches
+                         but commit nothing and open no pull requests. Takes
+                         precedence over SHIPYARD_MODE; conflicts with --live
 
 Login flags:
   --github-client-id <id> GitHub OAuth App client ID (env SHIPYARD_GITHUB_CLIENT_ID;
@@ -269,11 +278,12 @@ const (
 )
 
 // applyGuardrails resolves the allowlists and the pull-request budget
-// (flag wins over environment), refuses a run that is unguarded — no
-// repo or label allowlist without --i-know-this-is-unguarded — and
-// checks the target repo against the repo allowlist. It prints the
-// audit line (or the unguarded warning) to stderr and returns the
-// parsed allowlist plus the resolved pull-request budget.
+// (flag wins over environment), refuses a live run that is unguarded —
+// no repo or label allowlist without --i-know-this-is-unguarded (dry
+// runs are safe without one: they open nothing) — and checks the target
+// repo against the repo allowlist. It prints the audit line (or the
+// unguarded warning) to stderr and returns the parsed allowlist plus the
+// resolved pull-request budget.
 func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
 	repos := g.reposFlag
 	if repos == "" {
@@ -300,22 +310,29 @@ func applyGuardrails(g guardrailInput) (*guardrails.Allow, int, error) {
 		maxPRs = guardrails.DefaultMaxPRs
 	}
 	if maxPRs == 0 && !g.dryRun {
-		return nil, 0, errors.New("--max-prs is 0: a live run would never open a pull request; use --dry-run or raise the cap")
+		return nil, 0, errors.New("--max-prs is 0: a live run would never open a pull request; run in dry-run mode (or drop --live) or raise the cap")
 	}
 
 	if !allow.RepoAllowed(g.owner, g.repo) {
 		return nil, 0, fmt.Errorf("repo %s/%s is not in the repo allowlist (%s)", g.owner, g.repo, strings.Join(allow.Repos, ", "))
 	}
-	if err := allow.Gate(g.unguarded); err != nil {
-		return nil, 0, err
+	// The unguarded gate applies to live runs only: a dry run commits
+	// nothing and opens no pull requests, so it is safe without an
+	// allowlist.
+	if !g.dryRun {
+		if err := allow.Gate(g.unguarded); err != nil {
+			return nil, 0, err
+		}
 	}
 	if g.quiet {
 		return allow, maxPRs, nil
 	}
 	if allow.Configured() {
 		fmt.Fprintf(os.Stderr, "shipyard: guardrails: %s; max-prs: %d\n", allow.Summary(), maxPRs)
+	} else if g.dryRun {
+		fmt.Fprintln(os.Stderr, "shipyard: note: no repo or label allowlist is set — this dry run may act on any issue in the repository, but it opens no pull requests.")
 	} else {
-		fmt.Fprintln(os.Stderr, "shipyard: WARNING: no repo or label allowlist is set — this run is UNGUARDED (acknowledged with --i-know-this-is-unguarded) and may act on any issue in the repository.")
+		fmt.Fprintln(os.Stderr, "shipyard: WARNING: no repo or label allowlist is set — this live run is UNGUARDED (acknowledged with --i-know-this-is-unguarded) and may act on any issue in the repository.")
 	}
 	return allow, maxPRs, nil
 }
