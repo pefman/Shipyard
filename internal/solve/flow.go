@@ -118,6 +118,15 @@ func Solve(ctx context.Context, d Deps, o Options) (*Result, error) {
 	}
 	completion, err := d.AI.Complete(ctx, prompt)
 	if err != nil {
+		if o.Verbose {
+			// A failed call is exactly the case the verbose log exists
+			// for (a 500 from a local endpoint, a timeout, a non-JSON
+			// body): keep the diagnostics in the log, not just the raw
+			// error string.
+			for _, line := range d.AI.VerboseCompletionLines(completion) {
+				log("%s", RedactCredentials(line))
+			}
+		}
 		return nil, fmt.Errorf("calling AI endpoint: %w", err)
 	}
 	if o.Verbose {
