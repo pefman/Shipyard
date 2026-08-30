@@ -716,3 +716,36 @@ func TestCredentialsPathHonorsXDG(t *testing.T) {
 // nilSleeps is a package-level discard sink for tests that don't care
 // about the sleep schedule.
 var nilSleeps []time.Duration
+
+func TestLoadStoredAccessToken(t *testing.T) {
+	t.Run("no file: ok=false", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		if _, ok := LoadStoredAccessToken(); ok {
+			t.Error("LoadStoredAccessToken: ok = true with no credentials file")
+		}
+	})
+	t.Run("empty stored token: ok=false", func(t *testing.T) {
+		xdg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		if err := SaveCredentials(filepath.Join(xdg, "shipyard"), &Credentials{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := LoadStoredAccessToken(); ok {
+			t.Error("LoadStoredAccessToken: ok = true with an empty stored token")
+		}
+	})
+	t.Run("stored token returned", func(t *testing.T) {
+		xdg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		if err := SaveCredentials(filepath.Join(xdg, "shipyard"), &Credentials{AccessToken: "stored-tok", Username: "octo"}); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := LoadStoredAccessToken()
+		if !ok {
+			t.Fatal("LoadStoredAccessToken: ok = false, want true")
+		}
+		if got != "stored-tok" {
+			t.Errorf("LoadStoredAccessToken() = %q, want %q", got, "stored-tok")
+		}
+	})
+}

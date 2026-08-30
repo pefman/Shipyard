@@ -2,8 +2,12 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/pefman/Shipyard/internal/auth"
 )
 
 func TestFirstNonEmpty(t *testing.T) {
@@ -40,22 +44,54 @@ func setEnv(t *testing.T, values map[string]string) {
 	}
 }
 
+// writeStoredCredentials stores a `shipyard login`-shaped credentials file
+// under xdg/shipyard/credentials.json so the stored-token fallback layer
+// can be exercised deterministically.
+func writeStoredCredentials(t *testing.T, xdg, token string) {
+	t.Helper()
+	creds := &auth.Credentials{AccessToken: token, Username: "octocat", UpdatedAt: time.Now()}
+	if err := auth.SaveCredentials(filepath.Join(xdg, "shipyard"), creds); err != nil {
+		t.Fatalf("saving credentials: %v", err)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	const ghAPI = "https://api.github.com"
 	tests := []struct {
-		name    string
-		raw     Raw
-		env     map[string]string
-		want    Config
-		wantErr string // substring; "" means no error
+		name        string
+		raw         Raw
+		env         map[string]string
+		storedToken string // token stored via `shipyard login`, when not ""
+		want        Config
+		wantErr     string // substring; "" means no error
 	}{
 		{
 			// Custom is the default provider: the key is optional, so a
 			// keyless local endpoint is valid.
 			name: "nothing anywhere (default custom)",
 			wantErr: "missing required configuration: " +
-				"--github-token or SHIPYARD_GITHUB_TOKEN, " +
+				"--github-token, SHIPYARD_GITHUB_TOKEN, or shipyard login, " +
 				"--ai-endpoint or SHIPYARD_AI_ENDPOINT",
+		},
+		{
+			name:        "stored login is the last fallback",
+			raw:         Raw{AIEndpoint: "http://localhost:8080"},
+			storedToken: "stored-token",
+			want:        Config{GitHubToken: "stored-token", AIProvider: "custom", AIEndpoint: "http://localhost:8080", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name:        "env beats stored login",
+			raw:         Raw{AIEndpoint: "http://localhost:8080"},
+			env:         map[string]string{EnvGitHubToken: "env-token"},
+			storedToken: "stored-token",
+			want:        Config{GitHubToken: "env-token", AIProvider: "custom", AIEndpoint: "http://localhost:8080", GitHubAPIRoot: ghAPI},
+		},
+		{
+			name:        "flag beats env beats stored login",
+			raw:         Raw{GitHubToken: "flag-token", AIEndpoint: "http://localhost:8080"},
+			env:         map[string]string{EnvGitHubToken: "env-token"},
+			storedToken: "stored-token",
+			want:        Config{GitHubToken: "flag-token", AIProvider: "custom", AIEndpoint: "http://localhost:8080", GitHubAPIRoot: ghAPI},
 		},
 		{
 			name: "custom: endpoint and key from env",
@@ -169,6 +205,14 @@ func TestLoad(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Isolate the stored-credentials layer: XDG_CONFIG_HOME points
+			// at an empty temp dir so a login on the test machine can never
+			// leak into these cases.
+			xdg := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			if tc.storedToken != "" {
+				writeStoredCredentials(t, xdg, tc.storedToken)
+			}
 			setEnv(t, tc.env)
 			got, err := Load(tc.raw)
 			if tc.wantErr != "" {

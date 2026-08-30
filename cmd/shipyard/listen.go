@@ -65,7 +65,7 @@ func prepareListen(args []string) (*listenRun, error) {
 	label := &stringFlag{}
 	fs.Var(label, "label", "only solve issues carrying this label (repeatable)")
 	stateFile := fs.String("state-file", listen.DefaultStateFile, "file tracking processed issues")
-	githubToken := fs.String("github-token", "", "GitHub token")
+	githubToken := fs.String("github-token", "", "GitHub token (env SHIPYARD_GITHUB_TOKEN, else the token stored by shipyard login)")
 	aiProvider := fs.String("provider", "", "AI provider: openai, xai, or custom")
 	aiEndpoint := fs.String("ai-endpoint", "", "AI endpoint base URL")
 	aiKey := fs.String("ai-key", "", "AI API key")

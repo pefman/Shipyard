@@ -80,6 +80,25 @@ Notable changes to Shipyard, newest first.
 - A failed build/test step in the sandbox stops the run before commit,
   push, and pull request: a patch that does not pass verification never
   opens a PR.
+### Added (SHI-27)
+
+- Stored login is now used across every command: the GitHub token resolves
+  as `--github-token` flag > `SHIPYARD_GITHUB_TOKEN` env > the token
+  stored by `shipyard login` (first non-empty wins). With no token
+  anywhere, the "missing required configuration" error now points at
+  `shipyard login`.
+- `shipyard whoami`: shows which identity the token precedence resolves to
+  (`@login` — the stored username, or `GET /user` for flag/env tokens) and
+  the stored refresh-token expiry when that metadata exists. Clear
+  "not logged in" error when no token is available.
+- `shipyard logout`: removes the stored credentials file (clear error when
+  none is stored).
+
+### Docs (SHI-27)
+
+- README: new "Authentication" section covering `login` / `whoami` /
+  `logout` and the flag > env > stored token precedence; configuration
+  table notes that `--github-token` is only required when not logged in.
 
 ### Added (SHI-30)
 

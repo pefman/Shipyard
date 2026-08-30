@@ -402,6 +402,25 @@ func VerifyUser(ctx context.Context, hc *http.Client, apiBase, token string) (st
 	return user.Login, nil
 }
 
+// LoadStoredAccessToken returns the access token stored by `shipyard login`
+// at the default credentials path. ok is false when no credentials file
+// exists or the stored token is empty; callers treat that as "not logged
+// in", never as an error.
+func LoadStoredAccessToken() (token string, ok bool) {
+	path, err := CredentialsPath()
+	if err != nil {
+		return "", false
+	}
+	creds, err := LoadCredentials(path)
+	if err != nil {
+		return "", false
+	}
+	if creds.AccessToken == "" {
+		return "", false
+	}
+	return creds.AccessToken, true
+}
+
 // CredentialsPath returns the default path of the credentials file
 // (honoring $XDG_CONFIG_HOME via os.UserConfigDir).
 func CredentialsPath() (string, error) {
