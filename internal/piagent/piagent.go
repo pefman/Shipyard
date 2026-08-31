@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pefman/Shipyard/internal/sandbox"
@@ -69,6 +70,15 @@ const (
 	DefaultTimeout  = 30 * time.Minute
 )
 
+// DefaultContextWindow is the context window shipyard declares for the
+// configured model in the agent's models.json when the operator does
+// not override it (Config.ContextWindow). The agent triggers its
+// built-in context compaction off this *declared* size, so local
+// models with a smaller real window must be configured with it —
+// otherwise a big repo or issue overflows the model's real context
+// before the compaction ever kicks in.
+const DefaultContextWindow = 128000
+
 // Config is the agent's model/endpoint configuration, mapped from
 // shipyard's provider flags (see internal/config).
 type Config struct {
@@ -82,6 +92,12 @@ type Config struct {
 	APIKey string
 	// Model is the model id sent to the endpoint.
 	Model string
+	// ContextWindow declares the model's context window (tokens) in
+	// the agent's models.json; the agent compacts its context off this
+	// declared size. Zero (the default) uses DefaultContextWindow —
+	// right for large models, but local models with a smaller real
+	// window must set this (e.g. 32768 for a 32k local model).
+	ContextWindow int
 }
 
 // Validate reports missing required values.
@@ -161,7 +177,8 @@ func ConfigDir(workdir string) string { return filepath.Join(workdir, DirName) }
 // with the configured endpoint, key, and model. The model is marked
 // non-reasoning: shipyard wants predictable token behavior on any
 // endpoint (strong or local), so the agent never spends its budget on
-// extended thinking.
+// extended thinking. The declared context window (ContextWindow, or
+// DefaultContextWindow) drives the agent's built-in compaction.
 func modelsJSON(cfg Config) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", err
@@ -169,6 +186,10 @@ func modelsJSON(cfg Config) (string, error) {
 	key := cfg.APIKey
 	if key == "" {
 		key = defaultAPIKey
+	}
+	window := cfg.ContextWindow
+	if window <= 0 {
+		window = DefaultContextWindow
 	}
 	var b strings.Builder
 	b.WriteString("{\n  \"providers\": {\n    ")
@@ -178,8 +199,8 @@ func modelsJSON(cfg Config) (string, error) {
 	b.WriteString("      \"api\": \"openai-completions\",\n")
 	fmt.Fprintf(&b, "      \"apiKey\": %s,\n", jsonString(key))
 	b.WriteString("      \"models\": [\n")
-	fmt.Fprintf(&b, "        { \"id\": %s, \"name\": %s, \"reasoning\": false, \"input\": [\"text\"], \"contextWindow\": 128000, \"maxTokens\": 16384 }\n",
-		jsonString(cfg.Model), jsonString(cfg.Model))
+	fmt.Fprintf(&b, "        { \"id\": %s, \"name\": %s, \"reasoning\": false, \"input\": [\"text\"], \"contextWindow\": %d, \"maxTokens\": 16384 }\n",
+		jsonString(cfg.Model), jsonString(cfg.Model), window)
 	b.WriteString("      ]\n    }\n  }\n}\n")
 	return b.String(), nil
 }
@@ -351,7 +372,14 @@ func runNative(ctx context.Context, cancel context.CancelFunc, spec RunSpec, sin
 	code, err := exec(ctx, spec.Workdir, AgentEnv(spec.Workdir), AgentArgs(spec.Config.Model), sink.onLine)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, budgetError(sink, ctxErr)
+			if sink.turnCapHit || errors.Is(ctxErr, context.DeadlineExceeded) {
+				// A real budget stop (turn cap, or the run's own
+				// wall-clock deadline): report it as a budget error.
+				return nil, budgetError(sink, ctxErr)
+			}
+			// The parent context went away (e.g. a listen shutdown):
+			// report the cancellation itself, not a budget stop.
+			return nil, ctxErr
 		}
 		return nil, fmt.Errorf("agent: %w", err)
 	}
@@ -396,7 +424,14 @@ func runContainer(ctx context.Context, cancel context.CancelFunc, spec RunSpec, 
 	})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, budgetError(sink, ctxErr)
+			if sink.turnCapHit || errors.Is(ctxErr, context.DeadlineExceeded) {
+				// A real budget stop (turn cap, or the run's own
+				// wall-clock deadline): report it as a budget error.
+				return nil, budgetError(sink, ctxErr)
+			}
+			// The parent context went away (e.g. a listen shutdown):
+			// report the cancellation itself, not a budget stop.
+			return nil, ctxErr
 		}
 		return nil, fmt.Errorf("agent: %w", err)
 	}
@@ -460,9 +495,23 @@ func defaultExecNative(ctx context.Context, workdir string, env []string, args [
 		waitErr = cmd.Wait()
 		close(done)
 	}()
-	go pumpLines(out, "stdout", line)
-	go pumpLines(errOut, "stderr", line)
+	var pumps sync.WaitGroup
+	pumps.Add(2)
+	go func() {
+		pumpLines(out, "stdout", line)
+		pumps.Done()
+	}()
+	go func() {
+		pumpLines(errOut, "stderr", line)
+		pumps.Done()
+	}()
 	<-done
+	// Join the output pumps before returning: the caller reads the
+	// event sink's state (turns, summary, budget) right away, and a
+	// pump still flushing could update it a beat late — including a
+	// turn-budget stop, which would turn a budget-exhausted run into
+	// a "successful" one.
+	pumps.Wait()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return 0, fmt.Errorf("%w", ctxErr)
 	}

@@ -73,6 +73,7 @@ func prepareListen(args []string) (*listenRun, error) {
 	image := fs.String("image", "", "language image the sandbox container is built on (default: auto-detect)")
 	agentMaxTurns := fs.Int("agent-max-turns", -1, "cap the agent's assistant turns per issue (env SHIPYARD_AGENT_MAX_TURNS; default 30)")
 	agentTimeout := fs.Duration("agent-timeout", 0, "cap the agent run's wall clock per issue (env SHIPYARD_AGENT_TIMEOUT; default 30m)")
+	agentContextWindow := fs.Int("agent-context-window", 0, "context window (tokens) to declare for the model (env SHIPYARD_AGENT_CONTEXT_WINDOW; default 128000 — set it for local models with a smaller real window)")
 	live := fs.Bool("live", false, "live mode: commit the agent's work, push, and open pull requests (env SHIPYARD_MODE=live)")
 	dryRun := fs.Bool("dry-run", false, "dry-run mode (the default for listen): the agent's work is kept but nothing is committed and no pull requests are opened")
 	repos := fs.String("repos", "", "repository allowlist, comma-separated owner/repo (env SHIPYARD_REPOS)")
@@ -149,6 +150,11 @@ func prepareListen(args []string) (*listenRun, error) {
 		APIKey:   cfg.AIKey,
 		Model:    cfg.AIModel,
 	}
+	contextWindow, err := resolveAgentContextWindow(*agentContextWindow, os.Getenv(envAgentContextWindow))
+	if err != nil {
+		return nil, err
+	}
+	agentConfig.ContextWindow = contextWindow
 	if err := agentConfig.Validate(); err != nil {
 		return nil, err
 	}

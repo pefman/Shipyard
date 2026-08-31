@@ -5,10 +5,12 @@ the **built-in pi coding agent** on a checkout of the repository — the agent
 explores the code, makes the changes the issue requires, and builds and tests
 them (against the AI model you configure: any OpenAI-compatible endpoint).
 Shipyard then commits the agent's work on a branch, pushes it, and opens a
-pull request that links the source issue. Built in Go, single binary; the
-agent runtime (pi and its model plumbing) is embedded and needs nothing
-installed on the host. The host needs `git` (the flow uses the git CLI for
-clone / commit / push).
+pull request that links the source issue. Built in Go, single binary, and
+the agent runtime is built into Shipyard: sandboxed runs preinstall pi in
+the sandbox image from Shipyard's own vendor bundle (nothing is downloaded
+at run time). Native (no-Docker) runs instead need a `pi` binary on the
+host — see [Native agent runs](#native-agent-runs). The host needs `git`
+(the flow uses the git CLI for clone / commit / push).
 
 ## Build
 
@@ -41,6 +43,7 @@ Live runs are bounded by allowlists and a per-run pull-request budget:
 | Label allowlist | `--labels a,b` (on `listen` the repeatable `--label` is equivalent) | `SHIPYARD_LABELS` | Only issues carrying at least one allowed label are solved |
 | Pull-request budget | `--max-prs 5` | `SHIPYARD_MAX_PRS` | Hard per-run cap (default 3): after N pull requests the run exits cleanly with a summary, and issues it did not get to stay open for a later run. `--max-prs 0` is a dry-run setting, not a live one |
 | Agent budgets | `--agent-max-turns 30` / `--agent-timeout 30m` | `SHIPYARD_AGENT_MAX_TURNS` / `SHIPYARD_AGENT_TIMEOUT` | Per-issue caps on the agent's assistant turns and wall clock; a budget-exhausted run makes no commit, push, or PR |
+| Model context window | `--agent-context-window 32768` | `SHIPYARD_AGENT_CONTEXT_WINDOW` | Context window (tokens) declared for the model — the agent compacts its context off this size (default 128000). Set it to your local model's real window, or a big repo/issues will overflow the model before compaction kicks in |
 | Unguarded acknowledgment | `--all` | — | A live run with **no repo or label allowlist set is refused** unless this flag marks the allowlist axis as explicitly unrestricted — "no allowlist, on purpose" (the audit line then reads `guardrails: NONE (explicit --all)`, and `--all` conflicts with a set `--repos`/`--labels` allowlist). The hidden flag `--i-know-this-is-unguarded` remains a compatible alias |
 
 The gate applies to both commands: `listen` in live mode, and `solve`,
@@ -245,7 +248,9 @@ On success stdout prints the pull request URL (or the patch path for
 
 The agent is bounded per issue by `--agent-max-turns` (default 30) and
 `--agent-timeout` (default 30m); hitting either stops the run before
-any commit, push, or PR.
+any commit, push, or PR. (The wall-clock clock starts before the run:
+on a cold host the first run's wrapper-image build counts against it,
+so leave headroom for a first run on a new machine.)
 
 ### Failure modes
 
@@ -253,7 +258,7 @@ Shipyard fails fast with actionable errors for the expected failure modes:
 
 | Situation | Error contains |
 | --------- | -------------- |
-| The agent leaves the repository unchanged | `the agent returned no usable changes` |
+| The agent leaves the repository unchanged | `the agent made no usable changes` |
 | The agent's tree fails the build/test verification | `verify step … exited … — no commit, push, or PR was made` |
 | The agent hits its turn or wall-clock budget | `agent stopped: budget exhausted (no commit, push, or PR was made)` |
 | The agent run fails (endpoint down after retries, non-zero exit) | `agent run: … (will be retried on a later pass)` on `listen` |
@@ -433,6 +438,7 @@ Flags take precedence over environment variables.
 | `--ai-model`      | `SHIPYARD_AI_MODEL`       | no       | Model the agent uses (defaults: `gpt-5.6-sol` for `openai`, `grok-4.6` for `xai`) |
 | `--agent-max-turns` | `SHIPYARD_AGENT_MAX_TURNS` | no    | Cap the agent's assistant turns per issue (default 30) |
 | `--agent-timeout` | `SHIPYARD_AGENT_TIMEOUT`  | no       | Cap the agent run's wall clock per issue (default 30m) |
+| `--agent-context-window` | `SHIPYARD_AGENT_CONTEXT_WINDOW` | no | Context window (tokens) declared for the model, driving the agent's built-in context compaction (default 128000; set it to your local model's real window) |
 | `--workdir`       | —                         | no       | Local checkout to build on (default: clone to temp)  |
 | `--base`          | —                         | no       | Base branch (default: the repo's default branch)     |
 | `--branch`        | —                         | no       | Branch for the fix (default: `shipyard/issue-<n>`)   |

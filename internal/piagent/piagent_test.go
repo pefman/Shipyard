@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,6 +104,33 @@ func TestPrepareKeylessUsesPlaceholder(t *testing.T) {
 	models, _ := os.ReadFile(filepath.Join(work, DirName, "models.json"))
 	if !strings.Contains(string(models), `"apiKey": "none"`) {
 		t.Errorf("keyless endpoint should get the placeholder key:\n%s", models)
+	}
+}
+
+// TestModelsJSONContextWindow: an operator-set context window lands in
+// the agent's models.json (it drives the agent's built-in compaction),
+// and the default applies otherwise — a local model with a smaller
+// real window must be declared with it.
+func TestModelsJSONContextWindow(t *testing.T) {
+	work := t.TempDir()
+	cfg := testConfig()
+	cfg.ContextWindow = 4096
+	if err := Prepare(work, "task", cfg); err != nil {
+		t.Fatal(err)
+	}
+	models, _ := os.ReadFile(filepath.Join(work, DirName, "models.json"))
+	if !strings.Contains(string(models), `"contextWindow": 4096`) {
+		t.Errorf("declared context window not in models.json:\n%s", models)
+	}
+
+	work2 := t.TempDir()
+	if err := Prepare(work2, "task", testConfig()); err != nil {
+		t.Fatal(err)
+	}
+	models2, _ := os.ReadFile(filepath.Join(work2, DirName, "models.json"))
+	want := fmt.Sprintf(`"contextWindow": %d`, DefaultContextWindow)
+	if !strings.Contains(string(models2), want) {
+		t.Errorf("default context window not in models.json (want %s):\n%s", want, models2)
 	}
 }
 
@@ -410,16 +438,24 @@ func TestRunContainerVerifyStepFails(t *testing.T) {
 	}
 }
 
-// logBuf collects formatted log lines (concurrency-safe).
+// logBuf collects formatted log lines (the sink and the test share it;
+// the container path invokes the logger from several pumps
+// concurrently, so access is locked).
 type logBuf struct {
+	mu    sync.Mutex
 	lines []string
 }
 
 func (b *logBuf) logf(format string, args ...any) {
-	b.lines = append(b.lines, fmt.Sprintf(format, args...))
+	line := fmt.Sprintf(format, args...)
+	b.mu.Lock()
+	b.lines = append(b.lines, line)
+	b.mu.Unlock()
 }
 
 func (b *logBuf) has(s string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for _, l := range b.lines {
 		if strings.Contains(l, s) {
 			return true
@@ -428,4 +464,8 @@ func (b *logBuf) has(s string) bool {
 	return false
 }
 
-func (b *logBuf) String() string { return strings.Join(b.lines, "\n") }
+func (b *logBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Join(b.lines, "\n")
+}

@@ -23,7 +23,6 @@ type eventSink struct {
 	turnCapHit bool
 	budgetHit  bool
 	summary    string
-	finished   bool
 }
 
 func newEventSink(log func(string, ...any), verbose bool, maxTurns int, cancel func()) *eventSink {
@@ -150,7 +149,6 @@ func (s *eventSink) handleEvent(ev wireEvent) {
 		if ev.WillRetry {
 			s.log("agent: pausing to retry the model call ...")
 		} else {
-			s.finished = true
 			s.log("agent: finished (%d turn%s)", s.turns, plural(s.turns))
 		}
 	}

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pefman/Shipyard/internal/githubclient"
@@ -39,18 +40,26 @@ func readStubLog(t *testing.T, path string) string {
 	return string(data)
 }
 
-// newSolveLog collects the solve run's log lines for assertions.
+// newSolveLog collects the solve run's log lines for assertions (the
+// container path logs from several pumps concurrently, so access is
+// locked).
 type newSolveLogType struct {
+	mu    sync.Mutex
 	lines []string
 }
 
 func newSolveLog() *newSolveLogType { return &newSolveLogType{} }
 
 func (l *newSolveLogType) logf(format string, args ...any) {
-	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+	line := fmt.Sprintf(format, args...)
+	l.mu.Lock()
+	l.lines = append(l.lines, line)
+	l.mu.Unlock()
 }
 
 func (l *newSolveLogType) has(s string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	for _, line := range l.lines {
 		if strings.Contains(line, s) {
 			return true
@@ -59,7 +68,11 @@ func (l *newSolveLogType) has(s string) bool {
 	return false
 }
 
-func (l *newSolveLogType) String() string { return strings.Join(l.lines, "\n") }
+func (l *newSolveLogType) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
 
 // TestSolveLiveGoRepoRunsAgentInSandbox is the acceptance test for the
 // container path: a live solve on a Go repo auto-detects the golang

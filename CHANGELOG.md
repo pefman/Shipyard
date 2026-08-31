@@ -4,6 +4,39 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Fixed (SHI-47, follow-up to the review of PR #21)
+
+- **Data race in the native (no-Docker) agent run**: the run's stdout/
+  stderr pumps are now joined before the exit code is returned, so the
+  event sink's state (turn count, final summary, budget flags) is fully
+  settled before the flow reads it — a budget stop can no longer land a
+  beat late and turn a budget-exhausted run into a "successful" one.
+  `go test -race ./...` is now green.
+- **Parent cancellation is no longer reported as budget exhaustion**:
+  stopping the listener (`SIGINT`/`SIGTERM`) surfaces the cancellation
+  itself (the in-flight issue is left for the restart) instead of
+  claiming the wall-clock budget ran out.
+- **Test log buffers are synchronized again** (the container path logs
+  from several pumps at once); the production loggers were already
+  safe.
+- Docs: the README's host-requirements claim is scoped to sandboxed
+  runs (native runs need `pi` on the host), the failure-mode table
+  quotes the actual `the agent made no usable changes` message, the
+  wrapper-image build is described as logged via the run's own
+  `agent: running …` line, and the `--agent-timeout` clock is noted to
+  include the first run's wrapper-image build on a cold host.
+
+### Added (SHI-47, follow-up to the review of PR #21)
+
+- `--agent-context-window` (on both `solve` and `listen`, env
+  `SHIPYARD_AGENT_CONTEXT_WINDOW`, default 128000): the context window
+  (tokens) declared for the model in the agent's `models.json`. The
+  agent compacts its context off this *declared* size, so a local model
+  with a smaller real window (e.g. a 32k local inference model) must
+  declare it — otherwise a big repo or issue overflows the model's real
+  context before compaction ever kicks in. The default suits large
+  models; set the flag to your local model's real window.
+
 ### Changed (SHI-47)
 
 - **The solving engine is now the built-in pi coding agent** — no more
