@@ -268,6 +268,14 @@ type Runner interface {
 	// or natively on the host when BaseImage is empty. It returns the
 	// run outcome (image, turns, summary). A budget cap (turns or wall
 	// clock) surfaces as the wrapped context error.
+	//
+	// For container runs, a host-loopback endpoint
+	// (http://localhost:<port>…, 127.0.0.1, ::1) is remapped to
+	// HostGatewayName before the agent config is written, and the run
+	// starts with a from-sandbox TCP probe to that address: the same
+	// address the agent's models.json carries, checked in the same
+	// container run, so "the check passed but the agent cannot reach
+	// the server" cannot happen (see endpoint.go).
 	RunAgent(ctx context.Context, spec RunSpec) (*RunOutcome, error)
 }
 
@@ -344,22 +352,37 @@ func (runner) RunAgent(ctx context.Context, spec RunSpec) (*RunOutcome, error) {
 		timeout = DefaultTimeout
 	}
 
-	if err := Prepare(spec.Workdir, spec.Task, spec.Config); err != nil {
-		return nil, err
-	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	log := spec.Log
 	if log == nil {
 		log = func(string, ...any) {}
 	}
+	// The config the run actually uses: for container runs a loopback
+	// endpoint is remapped to HostGatewayName on a local copy of the
+	// config (spec.Config is never mutated, and native runs keep the
+	// original endpoint — on the host, localhost is correct there).
+	cfg := spec.Config
+	var probe *probeTarget
+	if spec.BaseImage != "" {
+		if remapped, ok := remapLoopbackEndpoint(cfg.Endpoint); ok {
+			log("agent: remapping loopback AI endpoint %s → %s for the sandbox (a host-local model server must bind a non-loopback interface, e.g. 0.0.0.0)", cfg.Endpoint, remapped)
+			cfg.Endpoint = remapped
+			probe = probeForRemap(spec.Config.Endpoint, remapped)
+		}
+	}
+	if err := Prepare(spec.Workdir, spec.Task, cfg); err != nil {
+		return nil, err
+	}
+	runSpec := spec
+	runSpec.Config = cfg
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	sink := newEventSink(log, spec.Verbose, maxTurns, cancel)
 
 	if spec.BaseImage == "" {
-		return runNative(runCtx, cancel, spec, sink, log)
+		return runNative(runCtx, cancel, runSpec, sink, log)
 	}
-	return runContainer(runCtx, cancel, spec, sink, log)
+	return runContainer(runCtx, cancel, runSpec, probe, sink, log)
 }
 
 // runNative executes the pi binary on the host in the checkout.
@@ -396,7 +419,11 @@ func runNative(ctx context.Context, cancel context.CancelFunc, spec RunSpec, sin
 
 // runContainer executes the agent (plus the verify commands) inside
 // the sandbox container on the wrapper image for spec.BaseImage.
-func runContainer(ctx context.Context, cancel context.CancelFunc, spec RunSpec, sink *eventSink, log func(string, ...any)) (*RunOutcome, error) {
+// probe is non-nil when a loopback endpoint was remapped: the run
+// then starts with a from-sandbox TCP probe to the remapped address,
+// and a failed probe stops the run with an actionable error before
+// the agent runs.
+func runContainer(ctx context.Context, cancel context.CancelFunc, spec RunSpec, probe *probeTarget, sink *eventSink, log func(string, ...any)) (*RunOutcome, error) {
 	build := spec.BuildImage
 	if build == nil {
 		build = BuildWrapperImage
@@ -411,12 +438,23 @@ func runContainer(ctx context.Context, cancel context.CancelFunc, spec RunSpec, 
 	}
 	log("agent: running the built-in pi agent in %s (base %s, pi %s)", wrapper, spec.BaseImage, Version)
 
-	commands := append([]string{AgentCommand(spec.Config.Model)}, spec.VerifyCommands...)
+	commands := make([]string, 0, len(spec.VerifyCommands)+2)
+	if probe != nil {
+		commands = append(commands, probeCommand(probe.host, probe.port))
+	}
+	commands = append(commands, AgentCommand(spec.Config.Model))
+	commands = append(commands, spec.VerifyCommands...)
 	res, err := run(ctx, sandbox.RunSpec{
 		Image:    wrapper,
 		Workdir:  spec.Workdir,
 		Commands: commands,
 		Env:      ContainerEnv(),
+		// Emitted on every container run: host.docker.internal must
+		// resolve on all platforms (Linux does not define it by
+		// default), which is what makes remapped — and
+		// user-supplied host.docker.internal — endpoints work from
+		// inside the sandbox.
+		ExtraHosts: []string{HostGatewayName + ":host-gateway"},
 		// The sandbox streams merged stdout/stderr through its logger;
 		// forward each line to the event sink (the JSON events are on
 		// stdout; non-JSON lines are just logged).
@@ -436,13 +474,20 @@ func runContainer(ctx context.Context, cancel context.CancelFunc, spec RunSpec, 
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 	if !res.OK {
+		agentStep := 0
+		if probe != nil {
+			agentStep = 1
+		}
 		for i, s := range res.Steps {
 			if !s.Ran {
 				return nil, fmt.Errorf("agent run in sandbox: step %d of %d (%q) did not run", i+1, len(res.Steps), s.Command)
 			}
 			if s.ExitCode != 0 {
+				if probe != nil && i == 0 {
+					return nil, errors.New(probeFailureMessage(probe.original, probe.remapped, probe.host+":"+probe.port))
+				}
 				name := "the agent"
-				if i > 0 {
+				if i > agentStep {
 					name = fmt.Sprintf("verify step %d", i+1)
 				}
 				return nil, fmt.Errorf("agent run in sandbox: %s (step %d of %d) exited %d: %s", name, i+1, len(res.Steps), s.ExitCode, s.Command)

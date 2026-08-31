@@ -83,7 +83,9 @@ Solve flags:
                          token stored by "shipyard login")
   --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
                          default custom: --ai-endpoint required, key optional)
-  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
+  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider;
+                         in sandbox runs a loopback value is remapped to host.docker.internal,
+                         see the README)
   --ai-key <k>           AI API key (env SHIPYARD_AI_KEY; also SHIPYARD_OPENAI_KEY / SHIPYARD_XAI_KEY)
   --ai-model <m>         Model the built-in agent uses, served by the endpoint
                          (env SHIPYARD_AI_MODEL; defaults: openai gpt-5.6-sol,
@@ -141,7 +143,9 @@ Listen flags:
                          token stored by "shipyard login")
   --provider <name>      AI provider: openai, xai, or custom (env SHIPYARD_AI_PROVIDER;
                          default custom: --ai-endpoint required, key optional)
-  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider)
+  --ai-endpoint <url>    AI endpoint base URL (env SHIPYARD_AI_ENDPOINT; defaults per provider;
+                         in sandbox runs a loopback value is remapped to host.docker.internal,
+                         see the README)
   --ai-key <k>           AI API key (env SHIPYARD_AI_KEY; also SHIPYARD_OPENAI_KEY / SHIPYARD_XAI_KEY)
   --ai-model <m>         Model the built-in agent uses, served by the endpoint
                          (env SHIPYARD_AI_MODEL; defaults: openai gpt-5.6-sol,

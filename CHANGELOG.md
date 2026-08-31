@@ -4,6 +4,32 @@ Notable changes to Shipyard, newest first.
 
 ## Unreleased
 
+### Fixed (SHI-48)
+
+- **Host-local AI endpoints are reachable from the sandbox**: a
+  sandbox run with `--ai-endpoint` on a host-loopback address
+  (`localhost`, `127.0.0.1` / `127.0.0.0/8`, `::1`) now remaps the
+  endpoint to `host.docker.internal` for the container run (a log line
+  announces it), every sandbox container starts with
+  `--add-host=host.docker.internal:host-gateway` so the name resolves
+  on all Docker platforms, and when an endpoint was remapped the
+  container run starts with a short-timeout TCP probe **from inside
+  the container** to that address — the same address the agent's model
+  calls use, so the check and the run agree by construction. When the
+  host-local model server is unreachable (e.g. it bound `127.0.0.1`
+  only), the run fails fast before the agent's first model call, with
+  an error naming the exact address used and the non-loopback bind
+  requirement (`--host 0.0.0.0`) instead of every model call ending in
+  `Connection error` and the run ending `the repository is unchanged`.
+  Non-loopback endpoints (public URLs, LAN addresses, explicit
+  `host.docker.internal`) pass through unchanged; native (no-Docker)
+  runs use the configured endpoint as-is, where `localhost` is the
+  host. The probe's failure message also names the rootless-podman
+  alternatives (`host.containers.internal`, `--net=host`).
+- Docs: a new README section, [Local model endpoints](README.md),
+  documents the host-reachability requirement; the failure-modes table
+  and the `--ai-endpoint` help text note the remap.
+
 ### Fixed (SHI-47, follow-up to the review of PR #21)
 
 - **Data race in the native (no-Docker) agent run**: the run's stdout/

@@ -270,6 +270,7 @@ Shipyard fails fast with actionable errors for the expected failure modes:
 | Remote branch name already taken (previous run) | `remote branch … already exists; … pass --branch` |
 | Docker not installed / daemon down (live run) | `sandbox: off (Docker not available: the agent runs natively on the host)` (native runs need the `pi` binary; see [Native agent runs](#native-agent-runs)) |
 | No AI endpoint configured | `no AI endpoint configured (set --ai-endpoint or SHIPYARD_AI_ENDPOINT)` |
+| Local model server unreachable from the sandbox (loopback endpoint, server bound to `127.0.0.1` only) | `agent: cannot reach your local AI endpoint from the sandbox: nothing answers at host.docker.internal:<port>` + the bind requirement (see [Local model endpoints](#local-model-endpoints)) |
 
 The agent's changes are saved to a patch file on every run, so a bad
 agent session is always inspectable.
@@ -466,7 +467,9 @@ model, so provider switches are one flag apart:
   required (`SHIPYARD_XAI_KEY` or `SHIPYARD_AI_KEY`).
 - `custom` (default) — any OpenAI-compatible endpoint via
   `--ai-endpoint` / `SHIPYARD_AI_ENDPOINT`; the key is optional, so a local
-  endpoint such as `http://localhost:8080` needs none.
+  endpoint such as `http://localhost:8080` needs none (sandboxed runs
+  reach host-local servers via `host.docker.internal` — see
+  [Local model endpoints](#local-model-endpoints)).
 
 `--ai-model` / `SHIPYARD_AI_MODEL` overrides the preset's default model in
 all cases. The API key is resolved in this order: `--ai-key` flag, then the
@@ -512,6 +515,50 @@ OpenAI, xAI, and most local servers do; non-streaming endpoints are not
 used. What the model returns is up to the model and the agent: the agent
 asks it for help as an LLM in a coding session, and decides what to do
 with the answers (edit files, run commands, finish).
+
+### Local model endpoints
+
+Sandboxed runs (Docker available) execute the agent **inside a
+container**, where `localhost` is the container itself — not your
+machine. A model server on the host (ninfer, ollama, vLLM, …) is
+therefore not reachable from the sandbox at
+`--ai-endpoint http://localhost:<port>/v1`, even though `curl`ing the
+same address from the host works. Shipyard handles this case:
+
+- **Remap.** A host-loopback endpoint (`localhost`, `127.0.0.1` /
+  `127.0.0.0/8`, `::1`) is remapped to `host.docker.internal` for the
+  sandbox run (a log line announces it), so the address the agent's
+  model calls use points at the host from inside the container.
+- **Host gateway mapping.** Every sandbox container starts with
+  `--add-host=host.docker.internal:host-gateway`, which resolves the
+  name on all Docker platforms (Linux does not define it by default;
+  on Docker Desktop it is redundant but harmless). This also makes an
+  endpoint you already configured as `http://host.docker.internal:…`
+  work on Linux.
+- **Pre-flight probe.** When an endpoint was remapped, the container
+  run starts with a short-timeout TCP connect **from inside the
+  container** to `host.docker.internal:<port>` — the same address the
+  agent's model calls use, checked in the same container run, so a
+  run can never pass the check and then fail to reach the server. If
+  nothing answers, the run stops before the agent's first model call
+  with an error naming the exact address and the bind requirement.
+
+The one requirement that is genuinely yours: **the model server must
+bind a non-loopback interface** — start it with `--host 0.0.0.0` (or
+the host's LAN address), not `127.0.0.1`. A server listening on
+loopback only is reachable from the host, which is exactly why the
+failure looks like "the server is fine but every model call is a
+Connection error". If it already binds `0.0.0.0` and the probe still
+fails, the block is usually a **host firewall** (ufw/nftables) that
+forbids the docker bridge network (`172.17.0.0/16`) from reaching that
+port — allow that range for the port, or point `--ai-endpoint` at an
+address the sandbox can reach (e.g. the model server's own container
+IP on the shared bridge, when it runs in a container too). Non-loopback
+endpoints (public URLs, LAN addresses, `host.docker.internal`) pass
+through unchanged. Native (no-Docker) runs use the endpoint exactly as
+configured — on the host, `localhost` is the host. On podman the
+host-gateway mapping is best-effort; the probe's failure message names
+the podman alternatives (`host.containers.internal`, `--net=host`).
 
 ### Debugging the agent
 

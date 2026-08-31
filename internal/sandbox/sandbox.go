@@ -61,6 +61,12 @@ type RunSpec struct {
 	// Env are extra KEY=VALUE environment variables for the container.
 	Env []string
 
+	// ExtraHosts are extra --add-host entries (name:IP) for the
+	// container, e.g. host.docker.internal:host-gateway so an
+	// in-container process can reach a host-local service under a name
+	// that resolves inside the container.
+	ExtraHosts []string
+
 	// Log receives the container's output line by line (stdout and
 	// stderr, minus the step sentinels). It may be called from several
 	// goroutines, so it must be concurrency-safe. Nil discards output.
@@ -124,6 +130,11 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 			return nil, fmt.Errorf("sandbox: malformed Env entry %q (want KEY=VALUE)", e)
 		}
 	}
+	for _, h := range spec.ExtraHosts {
+		if name, _, ok := strings.Cut(h, ":"); !ok || name == "" {
+			return nil, fmt.Errorf("sandbox: malformed ExtraHosts entry %q (want name:IP)", h)
+		}
+	}
 
 	docker, err := ensureDocker(ctx)
 	if err != nil {
@@ -153,6 +164,9 @@ func Run(ctx context.Context, spec RunSpec) (*RunResult, error) {
 	}
 	for _, e := range spec.Env {
 		args = append(args, "-e", e)
+	}
+	for _, h := range spec.ExtraHosts {
+		args = append(args, "--add-host", h)
 	}
 	args = append(args, image, "-c", buildScript(spec.Commands))
 
