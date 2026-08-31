@@ -138,10 +138,16 @@ func TestSolveLiveGoRepoRunsAgentInSandbox(t *testing.T) {
 // sandboxGolangImage pins the image the tests assert on.
 const sandboxGolangImage = "golang:1.22"
 
+// agentConfigForTests returns the dummy endpoint config the sandbox
+// e2e tests pass to the agent. The endpoint is deliberately
+// non-loopback: loopback endpoints trigger the from-sandbox reachability
+// probe (covered in internal/piagent), and the stub-docker "container"
+// in these tests executes on the host, where host.docker.internal is
+// not reachable. The stub agent never connects to the endpoint.
 func agentConfigForTests() piagent.Config {
 	return piagent.Config{
 		Provider: "custom",
-		Endpoint: "http://127.0.0.1:8765/v1",
+		Endpoint: "http://10.0.0.5:8765/v1",
 		Model:    "mock-model",
 	}
 }

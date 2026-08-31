@@ -109,7 +109,7 @@ case "$1" in
     v=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --name|--entrypoint|--build-arg|-t) shift 2 ;;
+        --name|--entrypoint|--build-arg|-t|--add-host) shift 2 ;;
         -v) v="$2"; shift 2 ;;
         -w|-e) shift 2 ;;
         --rm) shift ;;

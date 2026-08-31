@@ -40,7 +40,7 @@ case "$1" in
     v=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --name|--entrypoint) shift 2 ;;
+        --name|--entrypoint|--add-host) shift 2 ;;
         -v) v="$2"; shift 2 ;;
         -w|-e) shift 2 ;;
         --rm) shift ;;
@@ -219,6 +219,27 @@ func TestRunStopsAtFailedStep(t *testing.T) {
 	}
 }
 
+func TestRunExtraHosts(t *testing.T) {
+	installStub(t)
+	work := newWorkdir(t)
+	res, err := Run(context.Background(), RunSpec{
+		Image:      "golang:1.22",
+		Workdir:    work,
+		Commands:   []string{"true"},
+		ExtraHosts: []string{"host.docker.internal:host-gateway"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("OK = false, want true: %+v", res.Steps)
+	}
+	lg := stubLog(t)
+	if !strings.Contains(lg, "--add-host host.docker.internal:host-gateway") {
+		t.Errorf("stub docker saw no --add-host entry for the container:\n%s", lg)
+	}
+}
+
 func TestRunDockerNotInstalled(t *testing.T) {
 	// An empty PATH: no docker binary anywhere.
 	t.Setenv("PATH", t.TempDir())
@@ -314,6 +335,9 @@ func TestRunValidation(t *testing.T) {
 	}
 	if _, err := Run(ctx, RunSpec{Workdir: newWorkdir(t), Env: []string{"NOEQ"}}); err == nil {
 		t.Error("malformed Env entry accepted, want error")
+	}
+	if _, err := Run(ctx, RunSpec{Workdir: newWorkdir(t), ExtraHosts: []string{"nocolon"}}); err == nil {
+		t.Error("malformed ExtraHosts entry accepted, want error")
 	}
 }
 

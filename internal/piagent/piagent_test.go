@@ -10,13 +10,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pefman/Shipyard/internal/sandbox"
 	"github.com/pefman/Shipyard/internal/testpi"
 )
 
 func testConfig() Config {
 	return Config{
 		Provider: "custom",
-		Endpoint: "http://127.0.0.1:8765/v1",
+		// Deliberately non-loopback: the container path remaps
+		// loopback endpoints to host.docker.internal and starts with a
+		// from-sandbox probe (covered by dedicated tests below), while
+		// the stub-docker "container" in the tests runs on the host,
+		// where that address is not reachable.
+		Endpoint: "http://10.0.0.5:8765/v1",
 		APIKey:   "",
 		Model:    "mock-model",
 	}
@@ -57,7 +63,7 @@ func TestPrepareWritesConfigAndTask(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"shipyard"`,
-		`"baseUrl": "http://127.0.0.1:8765/v1"`,
+		`"baseUrl": "http://10.0.0.5:8765/v1"`,
 		`"api": "openai-completions"`,
 		`"id": "mock-model"`,
 		`"reasoning": false`,
@@ -397,8 +403,186 @@ func TestRunContainer(t *testing.T) {
 	if !strings.Contains(string(stubLog), "docker run") {
 		t.Errorf("docker run was never called:\n%s", stubLog)
 	}
+	if !strings.Contains(string(stubLog), "--add-host host.docker.internal:host-gateway") {
+		t.Errorf("the host gateway mapping was not passed to the container:\n%s", stubLog)
+	}
 	if !strings.Contains(string(stubLog), "PI_CODING_AGENT_DIR=/work/.shipyard-pi") {
 		t.Errorf("the agent's config dir was not passed to the container:\n%s", stubLog)
+	}
+}
+
+// loopbackConfig is testConfig with a host-loopback endpoint (the
+// incident's shape).
+func loopbackConfig() Config {
+	cfg := testConfig()
+	cfg.Endpoint = "http://localhost:8765/v1"
+	return cfg
+}
+
+// capturingSandbox returns a RunInSandbox seam that records the spec
+// the runner passes to the sandbox and answers with the given result
+// (no container is really started, so the probe step is not executed
+// — the seam is exactly the unit-test seam for the remap/probe
+// wiring).
+func capturingSandbox(res *specResult) func(context.Context, sandbox.RunSpec) (*sandbox.RunResult, error) {
+	return func(ctx context.Context, spec sandbox.RunSpec) (*sandbox.RunResult, error) {
+		res.Spec = spec
+		return &res.RunResult, nil
+	}
+}
+
+type specResult struct {
+	sandbox.RunResult
+	Spec sandbox.RunSpec
+}
+
+// TestRunContainerRemapsLoopbackEndpoint: a host-loopback endpoint is
+// remapped to host.docker.internal for the container run — the agent
+// config (models.json) and the from-sandbox probe both derive from
+// the remapped address, and the container gets the host gateway
+// mapping.
+func TestRunContainerRemapsLoopbackEndpoint(t *testing.T) {
+	testpi.InstallDocker(t)
+	work := t.TempDir()
+	res := &specResult{}
+	res.OK = true
+	for _, c := range []string{"probe", "agent"} {
+		res.Steps = append(res.Steps, sandbox.StepResult{Command: c, Ran: true, ExitCode: 0})
+	}
+	logs := &logBuf{}
+	cfg := loopbackConfig()
+	outcome, err := DefaultRunner.RunAgent(context.Background(), RunSpec{
+		Workdir:      work,
+		Task:         "the task",
+		Config:       cfg,
+		BaseImage:    "golang:1.22",
+		RunInSandbox: capturingSandbox(res),
+		Log:          logs.logf,
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !outcome.Container {
+		t.Error("container run reported as native")
+	}
+	got := res.Spec
+	if len(got.ExtraHosts) != 1 || got.ExtraHosts[0] != "host.docker.internal:host-gateway" {
+		t.Errorf("ExtraHosts = %v, want the host gateway mapping", got.ExtraHosts)
+	}
+	if len(got.Commands) != 2 {
+		t.Fatalf("Commands = %v, want probe + agent", got.Commands)
+	}
+	probe := got.Commands[0]
+	for _, want := range []string{"node", "host.docker.internal", "8765"} {
+		if !strings.Contains(probe, want) {
+			t.Errorf("probe command missing %q:\n%s", want, probe)
+		}
+	}
+	if !strings.Contains(got.Commands[1], "pi --mode json") {
+		t.Errorf("agent command not second:\n%s", got.Commands[1])
+	}
+	// The agent config on disk carries the remapped address: the
+	// probe and the agent agree by construction (one models.json,
+	// one container run, one network namespace).
+	models, _ := os.ReadFile(filepath.Join(work, DirName, "models.json"))
+	if !strings.Contains(string(models), `"baseUrl": "http://host.docker.internal:8765/v1"`) {
+		t.Errorf("models.json does not carry the remapped address:\n%s", models)
+	}
+	// The caller's spec.Config is never mutated.
+	if cfg.Endpoint != "http://localhost:8765/v1" {
+		t.Errorf("spec.Config was mutated: %q", cfg.Endpoint)
+	}
+	if !logs.has("remapping loopback AI endpoint") {
+		t.Errorf("remap log line missing:\n%s", logs)
+	}
+}
+
+// TestRunContainerProbeFails: the from-sandbox probe does not reach
+// the host-local server (e.g. bound to 127.0.0.1 only); the run fails
+// before the agent runs, and the error names the exact address and
+// the bind requirement.
+func TestRunContainerProbeFails(t *testing.T) {
+	testpi.InstallDocker(t)
+	work := t.TempDir()
+	res := &specResult{}
+	res.Steps = []sandbox.StepResult{
+		{Command: "probe", Ran: true, ExitCode: 1},
+		{Command: "agent", Ran: false, ExitCode: -1},
+	}
+	_, err := DefaultRunner.RunAgent(context.Background(), RunSpec{
+		Workdir:      work,
+		Task:         "the task",
+		Config:       loopbackConfig(),
+		BaseImage:    "golang:1.22",
+		RunInSandbox: capturingSandbox(res),
+	})
+	if err == nil {
+		t.Fatal("want an error when the from-sandbox probe fails")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"host.docker.internal:8765",
+		"http://localhost:8765/v1",
+		"0.0.0.0",
+		"non-loopback",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+// TestRunContainerNonLoopbackEndpointPassesThrough: a non-loopback
+// endpoint is not remapped and no probe step is added (no regression
+// for ordinary remote endpoints); the host gateway mapping is still
+// passed to the container.
+func TestRunContainerNonLoopbackEndpointPassesThrough(t *testing.T) {
+	testpi.InstallDocker(t)
+	work := t.TempDir()
+	res := &specResult{}
+	res.OK = true
+	for _, c := range []string{"agent"} {
+		res.Steps = append(res.Steps, sandbox.StepResult{Command: c, Ran: true, ExitCode: 0})
+	}
+	_, err := DefaultRunner.RunAgent(context.Background(), RunSpec{
+		Workdir:      work,
+		Task:         "the task",
+		Config:       testConfig(),
+		BaseImage:    "golang:1.22",
+		RunInSandbox: capturingSandbox(res),
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := res.Spec
+	if len(got.Commands) != 1 || !strings.HasPrefix(got.Commands[0], "pi ") {
+		t.Errorf("no probe step expected for a non-loopback endpoint: %v", got.Commands)
+	}
+	if len(got.ExtraHosts) != 1 || got.ExtraHosts[0] != "host.docker.internal:host-gateway" {
+		t.Errorf("ExtraHosts = %v, want the host gateway mapping", got.ExtraHosts)
+	}
+	models, _ := os.ReadFile(filepath.Join(work, DirName, "models.json"))
+	if !strings.Contains(string(models), `"baseUrl": "http://10.0.0.5:8765/v1"`) {
+		t.Errorf("non-loopback endpoint was rewritten in models.json:\n%s", models)
+	}
+}
+
+// TestRunNativeKeepsLoopbackEndpoint: a native run (no Docker) keeps
+// the loopback endpoint as-is — on the host, localhost is the host.
+func TestRunNativeKeepsLoopbackEndpoint(t *testing.T) {
+	testpi.Install(t)
+	work := t.TempDir()
+	_, err := DefaultRunner.RunAgent(context.Background(), RunSpec{
+		Workdir: work,
+		Task:    "the task",
+		Config:  loopbackConfig(),
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	models, _ := os.ReadFile(filepath.Join(work, DirName, "models.json"))
+	if !strings.Contains(string(models), `"baseUrl": "http://localhost:8765/v1"`) {
+		t.Errorf("native run remapped the endpoint, want it unchanged:\n%s", models)
 	}
 }
 
